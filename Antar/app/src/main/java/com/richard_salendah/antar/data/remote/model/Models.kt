@@ -105,15 +105,18 @@ data class TripResponse(
     @SerializedName("rider_counter_count")  val riderCounterCount: Int,
     @SerializedName("created_at")           val createdAt: String,
     @SerializedName("updated_at")           val updatedAt: String,
-    // Driver info — populated once a driver is assigned
+    // Driver info
     @SerializedName("driver_name")          val driverName: String = "",
     @SerializedName("driver_phone")         val driverPhone: String = "",
-    // Option A: driver live location via polling.
-    // Both are 0.0 when no driver is assigned or driver has no GPS fix.
-    // When migrating to Option B (Realtime), these fields stay — only the
-    // data source changes (Realtime push instead of poll response).
+    // Option A: driver live location via polling
     @SerializedName("driver_lat")           val driverLat: Double = 0.0,
     @SerializedName("driver_lng")           val driverLng: Double = 0.0,
+    // Trip map coordinates — used to render pickup/dropoff pins and OSRM routes.
+    // dropoffLat/dropoffLng are 0.0 for errand trips (no dropoff location).
+    @SerializedName("pickup_lat")           val pickupLat: Double = 0.0,
+    @SerializedName("pickup_lng")           val pickupLng: Double = 0.0,
+    @SerializedName("dropoff_lat")          val dropoffLat: Double = 0.0,
+    @SerializedName("dropoff_lng")          val dropoffLng: Double = 0.0,
     // Rating state
     @SerializedName("rider_has_rated")      val riderHasRated: Boolean = false,
 )

@@ -309,20 +309,21 @@ func (h *Handler) NearbyDrivers(c *gin.Context) {
 	response.Success(c, drivers)
 }
 
-// ── Trip queries ──────────────────────────────────────────────────────────────
-
-// tripSelect is the shared SELECT used by GetActiveTrip, ListTrips, and GetTrip.
-// Columns must match scanTrip() exactly.
+// ── Trip query shared constant ────────────────────────────────────────────────
 //
-// Option A (current): driver_lat and driver_lng are populated by joining
-// driver_profiles.last_location. This is refreshed on every poll (3s on active
-// trip screen, longer elsewhere).
+// tripSelect is used by GetActiveTrip, ListTrips, and GetTrip.
+// Column order must match scanTrip() exactly.
 //
-// Option B (future - Realtime): when migrating, driver_lat/driver_lng will be
-// pushed directly by the Realtime subscription on driver_profiles. The fields
-// stay in this struct and in TripResponse — only the data source changes.
-// The JOIN below can be removed from tripSelect at that point since location
-// will arrive via a separate channel, but keeping it causes no harm as a fallback.
+// Pickup/dropoff coordinates:
+//
+//	ST_Y extracts latitude, ST_X extracts longitude from the PostGIS point.
+//	Dropoff coords are 0.0 for errand trips (NULL dropoff_location).
+//
+// Driver live location (Option A — polling):
+//
+//	Populated by joining driver_profiles.last_location.
+//	Option B migration: remove these JOIN columns once Realtime pushes
+//	last_lat/last_lng directly to the Android app.
 const tripSelect = `
 	SELECT t.id, t.rider_id, t.driver_id, t.offered_by, t.status,
 	       t.trip_type::text, t.note,
@@ -335,10 +336,12 @@ const tripSelect = `
 	       t.created_at::text, t.updated_at::text,
 	       COALESCE(dp.full_name,'')    AS driver_name,
 	       COALESCE(dp.phone_number,'') AS driver_phone,
-	       -- Option A: live driver location via DB join.
-	       -- 0.0 when driver has no GPS fix or is not yet assigned.
 	       COALESCE(ST_Y(dp.last_location::geometry), 0) AS driver_lat,
 	       COALESCE(ST_X(dp.last_location::geometry), 0) AS driver_lng,
+	       COALESCE(ST_Y(t.pickup_location::geometry),  0) AS pickup_lat,
+	       COALESCE(ST_X(t.pickup_location::geometry),  0) AS pickup_lng,
+	       COALESCE(ST_Y(t.dropoff_location::geometry), 0) AS dropoff_lat,
+	       COALESCE(ST_X(t.dropoff_location::geometry), 0) AS dropoff_lng,
 	       EXISTS(
 	           SELECT 1 FROM ratings r
 	           WHERE r.trip_id = t.id AND r.rater_role = 'rider'
@@ -363,6 +366,8 @@ func scanTrip(row interface {
 		&t.CreatedAt, &t.UpdatedAt,
 		&t.DriverName, &t.DriverPhone,
 		&t.DriverLat, &t.DriverLng,
+		&t.PickupLat, &t.PickupLng,
+		&t.DropoffLat, &t.DropoffLng,
 		&t.RiderHasRated,
 	)
 }

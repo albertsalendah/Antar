@@ -80,18 +80,25 @@ type TripResponse struct {
 	CreatedAt string `json:"created_at"`
 	UpdatedAt string `json:"updated_at"`
 
-	// Driver info — populated once a driver is assigned (status >= offered)
+	// Driver info — populated once a driver is assigned
 	DriverName  string `json:"driver_name"`
 	DriverPhone string `json:"driver_phone"`
 
-	// Driver live location — Option A (polling).
-	// Both are 0 when no driver is assigned yet or driver has no location fix.
-	// When migrating to Option B (Realtime), these fields stay in the model
-	// but are populated by the Realtime handler instead of the DB join.
+	// Driver live location — Option A (polling via DB join).
+	// Option B (Realtime): same fields, different data source.
+	// Both are 0.0 when no driver assigned or driver has no GPS fix.
 	DriverLat float64 `json:"driver_lat"`
 	DriverLng float64 `json:"driver_lng"`
 
-	// Rating state — true if the rider has already rated this trip
+	// Trip coordinates — used by the map to render pickup/dropoff pins
+	// and to compute OSRM routes.
+	// DropoffLat/DropoffLng are 0.0 for errand trips (no dropoff).
+	PickupLat  float64 `json:"pickup_lat"`
+	PickupLng  float64 `json:"pickup_lng"`
+	DropoffLat float64 `json:"dropoff_lat"`
+	DropoffLng float64 `json:"dropoff_lng"`
+
+	// Rating state
 	RiderHasRated bool `json:"rider_has_rated"`
 }
 

@@ -19,7 +19,6 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
@@ -32,11 +31,6 @@ import androidx.compose.material.icons.filled.DirectionsCar
 import androidx.compose.material.icons.filled.LocationOn
 import androidx.compose.material.icons.filled.MyLocation
 import androidx.compose.material.icons.filled.Person
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableFloatStateOf
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
@@ -53,6 +47,11 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -69,11 +68,13 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.richard_salendah.antar.data.model.TripResponse
 import org.osmdroid.config.Configuration
 import org.osmdroid.tileprovider.tilesource.TileSourceFactory
 import org.osmdroid.util.GeoPoint
 import org.osmdroid.views.MapView
 import org.osmdroid.views.overlay.Marker
+import org.osmdroid.views.overlay.Polyline
 import java.text.NumberFormat
 import java.util.Locale
 
@@ -87,40 +88,50 @@ fun ActiveTripScreen(
     onTripCompleted: () -> Unit,
     viewModel: ActiveTripViewModel = viewModel(),
 ) {
-    val context       = LocalContext.current
-    val lifecycle     = LocalLifecycleOwner.current.lifecycle
+    val context        = LocalContext.current
+    val lifecycle      = LocalLifecycleOwner.current.lifecycle
     val screenHeightDp = LocalConfiguration.current.screenHeightDp.dp
-    val density       = LocalDensity.current
+    val density        = LocalDensity.current
 
     val maxSheetHeight: Dp = screenHeightDp * 0.75f
-    val minSheetHeight: Dp = 180.dp
+    val minSheetHeight: Dp = 195.dp
 
     var mapView        by remember { mutableStateOf<MapView?>(null) }
     var sheetExpansion by remember { mutableFloatStateOf(0f) }
     var dragAccum      by remember { mutableFloatStateOf(0f) }
-
-    val sheetHeight = minSheetHeight + (maxSheetHeight - minSheetHeight) * sheetExpansion
+    val sheetHeight    = minSheetHeight + (maxSheetHeight - minSheetHeight) * sheetExpansion
 
     val trip           = viewModel.trip
     val driverLocation by viewModel.driverLocation.collectAsState()
+    val routePoints    = viewModel.routePoints
 
     LaunchedEffect(Unit) {
         Configuration.getInstance().userAgentValue = context.packageName
         viewModel.start(tripId, onTripCompleted)
     }
 
-    // Centre map on driver when first location fix arrives
-    LaunchedEffect(driverLocation) {
+    // Centre map: on driver when agreed, midpoint between driver+dropoff when in_progress
+    LaunchedEffect(driverLocation, trip?.status) {
+        val map = mapView ?: return@LaunchedEffect
         val loc = driverLocation ?: return@LaunchedEffect
-        if (mapView != null) {
-            mapView!!.controller.animateTo(GeoPoint(loc.lat, loc.lng))
+        when (trip?.status) {
+            "agreed"      -> map.controller.animateTo(GeoPoint(loc.lat, loc.lng))
+            "in_progress" -> {
+                if (trip.dropoffLat != 0.0) {
+                    val midLat = (loc.lat + trip.dropoffLat) / 2
+                    val midLng = (loc.lng + trip.dropoffLng) / 2
+                    map.controller.animateTo(GeoPoint(midLat, midLng))
+                } else {
+                    map.controller.animateTo(GeoPoint(loc.lat, loc.lng))
+                }
+            }
         }
     }
 
-    // Refresh map markers on every location update or status change
-    LaunchedEffect(driverLocation, trip) {
+    // Refresh map overlays whenever driver moves, status changes, or route updates
+    LaunchedEffect(driverLocation, trip, routePoints) {
         val map = mapView ?: return@LaunchedEffect
-        updateMarkers(map, trip, driverLocation)
+        updateOverlays(map, trip, driverLocation, routePoints)
     }
 
     // MapView lifecycle
@@ -193,8 +204,7 @@ fun ActiveTripScreen(
                             detectVerticalDragGestures(
                                 onDragStart = { dragAccum = 0f },
                                 onDragEnd   = {
-                                    sheetExpansion =
-                                        if (sheetExpansion > 0.4f) 1f else 0f
+                                    sheetExpansion = if (sheetExpansion > 0.4f) 1f else 0f
                                 },
                                 onVerticalDrag = { _, delta ->
                                     dragAccum += delta
@@ -211,14 +221,12 @@ fun ActiveTripScreen(
                 ) {
                     Box(
                         modifier = Modifier
-                            .width(40.dp)
-                            .height(4.dp)
+                            .width(40.dp).height(4.dp)
                             .clip(RoundedCornerShape(2.dp))
                             .background(Color(0xFFDDDDDD)),
                     )
                 }
 
-                // ── Always visible: status stepper ────────────────────────────
                 if (trip == null) {
                     Box(
                         modifier = Modifier.fillMaxWidth().padding(32.dp),
@@ -232,15 +240,16 @@ fun ActiveTripScreen(
                             .navigationBarsPadding()
                             .padding(horizontal = 16.dp, vertical = 8.dp),
                     ) {
+                        // ── Always visible: status stepper ────────────────────
                         StatusStepper(status = trip.status)
+
+                        Spacer(Modifier.height(10.dp))
 
                         // ── Expanded: fare + route detail ─────────────────────
                         if (sheetExpansion > 0.1f) {
-                            Spacer(Modifier.height(12.dp))
-
                             Card(
                                 modifier  = Modifier.fillMaxWidth(),
-                                shape     = RoundedCornerShape(14.dp),
+                                shape     = RoundedCornerShape(12.dp),
                                 colors    = CardDefaults.cardColors(containerColor = Color(0xFFF8F8F8)),
                                 elevation = CardDefaults.cardElevation(0.dp),
                             ) {
@@ -250,16 +259,21 @@ fun ActiveTripScreen(
                                     verticalAlignment     = Alignment.CenterVertically,
                                 ) {
                                     Column {
-                                        Text("Total Ongkos",
+                                        Text(
+                                            "Total Ongkos",
                                             style = MaterialTheme.typography.labelSmall.copy(
-                                                color = Color(0xFF999999)))
+                                                color = Color(0xFF999999)),
+                                        )
                                         Text(
                                             formatRupiah(trip.fare ?: trip.offeredFare ?: 0.0),
                                             style = MaterialTheme.typography.titleMedium.copy(
                                                 color = PrimaryBlue, fontWeight = FontWeight.Bold),
                                         )
                                     }
-                                    Surface(shape = RoundedCornerShape(8.dp), color = Color(0xFFE8F4FD)) {
+                                    Surface(
+                                        shape = RoundedCornerShape(8.dp),
+                                        color = Color(0xFFE8F4FD),
+                                    ) {
                                         Text(
                                             trip.paymentMethod.replaceFirstChar { it.uppercase() },
                                             style    = MaterialTheme.typography.labelMedium.copy(
@@ -270,43 +284,57 @@ fun ActiveTripScreen(
                                 }
                             }
 
-                            Spacer(Modifier.height(10.dp))
+                            Spacer(Modifier.height(8.dp))
 
                             Card(
                                 modifier  = Modifier.fillMaxWidth(),
-                                shape     = RoundedCornerShape(14.dp),
+                                shape     = RoundedCornerShape(12.dp),
                                 colors    = CardDefaults.cardColors(containerColor = Color(0xFFF8F8F8)),
                                 elevation = CardDefaults.cardElevation(0.dp),
                             ) {
                                 Column(modifier = Modifier.padding(14.dp)) {
-                                    DetailRow(Icons.Default.LocationOn, PrimaryBlue,
-                                        "Penjemputan", trip.pickupAddress)
+                                    DetailRow(
+                                        icon     = Icons.Default.LocationOn,
+                                        iconTint = PrimaryBlue,
+                                        label    = "Penjemputan",
+                                        value    = trip.pickupAddress,
+                                    )
                                     if (trip.tripType == "transport" &&
                                         !trip.dropoffAddress.isNullOrBlank()) {
                                         HorizontalDivider(
                                             Modifier.padding(vertical = 10.dp),
-                                            color = Color(0xFFF0F0F0))
-                                        DetailRow(Icons.Default.LocationOn, Red,
-                                            "Tujuan", trip.dropoffAddress!!)
+                                            color = Color(0xFFF0F0F0),
+                                        )
+                                        DetailRow(
+                                            icon     = Icons.Default.LocationOn,
+                                            iconTint = Red,
+                                            label    = "Tujuan",
+                                            value    = trip.dropoffAddress!!,
+                                        )
                                     } else if (trip.tripType == "errand" &&
                                         !trip.note.isNullOrBlank()) {
                                         HorizontalDivider(
                                             Modifier.padding(vertical = 10.dp),
-                                            color = Color(0xFFF0F0F0))
-                                        DetailRow(Icons.Default.DirectionsCar,
-                                            Color(0xFF777777), "Keterangan", trip.note!!)
+                                            color = Color(0xFFF0F0F0),
+                                        )
+                                        DetailRow(
+                                            icon     = Icons.Default.DirectionsCar,
+                                            iconTint = Color(0xFF777777),
+                                            label    = "Keterangan",
+                                            value    = trip.note!!,
+                                        )
                                     }
                                 }
                             }
-                        }
 
-                        Spacer(Modifier.height(10.dp))
+                            Spacer(Modifier.height(8.dp))
+                        }
 
                         // ── Always visible: driver bar ────────────────────────
                         Surface(
-                            modifier  = Modifier.fillMaxWidth(),
-                            shape     = RoundedCornerShape(14.dp),
-                            color     = Color.White,
+                            modifier        = Modifier.fillMaxWidth(),
+                            shape           = RoundedCornerShape(12.dp),
+                            color           = Color.White,
                             shadowElevation = 2.dp,
                         ) {
                             Row(
@@ -316,35 +344,47 @@ fun ActiveTripScreen(
                                 verticalAlignment     = Alignment.CenterVertically,
                                 horizontalArrangement = Arrangement.spacedBy(12.dp),
                             ) {
-                                Surface(shape = CircleShape, color = Color(0xFFE8F4FD),
-                                    modifier = Modifier.size(44.dp)) {
-                                    Box(contentAlignment = Alignment.Center,
-                                        modifier = Modifier.fillMaxSize()) {
-                                        Icon(Icons.Default.Person, null,
-                                            tint = PrimaryBlue, modifier = Modifier.size(24.dp))
+                                Surface(
+                                    shape    = CircleShape,
+                                    color    = Color(0xFFE8F4FD),
+                                    modifier = Modifier.size(44.dp),
+                                ) {
+                                    Box(
+                                        contentAlignment = Alignment.Center,
+                                        modifier         = Modifier.fillMaxSize(),
+                                    ) {
+                                        Icon(
+                                            Icons.Default.Person, null,
+                                            tint     = PrimaryBlue,
+                                            modifier = Modifier.size(24.dp),
+                                        )
                                     }
                                 }
                                 Column(modifier = Modifier.weight(1f)) {
-                                    Text("Driver Anda",
-                                        style = MaterialTheme.typography.labelSmall.copy(
-                                            color = Color(0xFF999999)))
                                     Text(
-                                        trip?.driverName?.ifEmpty {
-                                            trip?.driverId?.takeLast(6)?.uppercase() ?: "—"
-                                        } ?: "—",
+                                        "Driver Anda",
+                                        style = MaterialTheme.typography.labelSmall.copy(
+                                            color = Color(0xFF999999)),
+                                    )
+                                    Text(
+                                        trip.driverName.ifEmpty {
+                                            trip.driverId?.takeLast(6)?.uppercase() ?: "—"
+                                        },
                                         style = MaterialTheme.typography.bodyLarge.copy(
                                             fontWeight = FontWeight.SemiBold,
                                             color      = Color(0xFF1A1A1A)),
                                     )
-                                    if (!trip?.driverPhone.isNullOrEmpty()) {
-                                        Text(trip!!.driverPhone,
+                                    if (trip.driverPhone.isNotEmpty()) {
+                                        Text(
+                                            trip.driverPhone,
                                             style = MaterialTheme.typography.bodySmall.copy(
-                                                color = Color(0xFF888888)))
+                                                color = Color(0xFF888888)),
+                                        )
                                     }
                                 }
                                 FilledIconButton(
                                     onClick = {
-                                        val phone = trip?.driverPhone?.ifEmpty { null }
+                                        val phone  = trip.driverPhone.ifEmpty { null }
                                         val intent = if (phone != null)
                                             Intent(Intent.ACTION_DIAL, Uri.parse("tel:$phone"))
                                         else Intent(Intent.ACTION_DIAL)
@@ -354,8 +394,11 @@ fun ActiveTripScreen(
                                         containerColor = PrimaryBlue),
                                     modifier = Modifier.size(40.dp),
                                 ) {
-                                    Icon(Icons.Default.Call, "Hubungi driver",
-                                        tint = Color.White, modifier = Modifier.size(18.dp))
+                                    Icon(
+                                        Icons.Default.Call, "Hubungi driver",
+                                        tint     = Color.White,
+                                        modifier = Modifier.size(18.dp),
+                                    )
                                 }
                             }
                         }
@@ -366,48 +409,90 @@ fun ActiveTripScreen(
     }
 }
 
-// ── Map markers ───────────────────────────────────────────────────────────────
+// ── Map overlays ──────────────────────────────────────────────────────────────
 
-private fun updateMarkers(
-    map: MapView,
-    trip: com.richard_salendah.antar.data.model.TripResponse?,
-    driverLoc: DriverLocation?,
+private fun updateOverlays(
+    map:          MapView,
+    trip:         TripResponse?,
+    driverLoc:    DriverLocation?,
+    routePoints:  List<GeoPoint>,
 ) {
-    map.overlays.removeAll { it is Marker }
+    map.overlays.removeAll { it is Marker || it is Polyline }
 
-    // Pickup pin (blue, always shown)
-    // We don't have pickup coords in TripResponse on the rider side — we use a
-    // label marker at the driver's current position pointing toward pickup.
-    // Full pickup coords would require adding pickup_lat/pickup_lng to the response.
-    // For now, centre on the driver and show a labelled pickup marker when available.
+    if (trip == null) { map.invalidate(); return }
 
-    // Driver pin — accent blue, moving
+    val status = trip.status
+
+    // ── Route line ────────────────────────────────────────────────────────────
+    if (routePoints.isNotEmpty()) {
+        // Blue when heading to pickup, red when in progress toward dropoff
+        val lineColor = if (status == "in_progress")
+            android.graphics.Color.parseColor("#E53935")
+        else
+            android.graphics.Color.parseColor("#1B6CA8")
+
+        Polyline(map).apply {
+            setPoints(routePoints)
+            outlinePaint.apply {
+                color       = lineColor
+                strokeWidth = 8f
+                isAntiAlias = true
+                strokeCap   = android.graphics.Paint.Cap.ROUND
+                strokeJoin  = android.graphics.Paint.Join.ROUND
+            }
+            map.overlays.add(this)
+        }
+    }
+
+    // ── Pickup pin (PrimaryBlue) — always visible ─────────────────────────────
+    if (trip.pickupLat != 0.0) {
+        Marker(map).apply {
+            id       = "pickup"
+            position = GeoPoint(trip.pickupLat, trip.pickupLng)
+            title    = "Penjemputan"
+            snippet  = trip.pickupAddress
+            icon     = circleDrawable(map.context, 0xFF1B6CA8.toInt(), 30)
+            setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_BOTTOM)
+            map.overlays.add(this)
+        }
+    }
+
+    // ── Dropoff pin (Red) — only for transport trips when in_progress ─────────
+    if (status == "in_progress" &&
+        trip.tripType == "transport" &&
+        trip.dropoffLat != 0.0) {
+        Marker(map).apply {
+            id       = "dropoff"
+            position = GeoPoint(trip.dropoffLat, trip.dropoffLng)
+            title    = "Tujuan"
+            snippet  = trip.dropoffAddress ?: ""
+            icon     = circleDrawable(map.context, 0xFFE53935.toInt(), 30)
+            setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_BOTTOM)
+            map.overlays.add(this)
+        }
+    }
+
+    // ── Driver pin (AccentBlue, moving) ───────────────────────────────────────
     driverLoc?.let { loc ->
         Marker(map).apply {
             id       = "driver"
             position = GeoPoint(loc.lat, loc.lng)
-            title    = "Driver"
+            title    = trip.driverName.ifEmpty { "Driver" }
             icon     = circleDrawable(map.context, 0xFF03A9F4.toInt(), 32)
             setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_CENTER)
             map.overlays.add(this)
         }
     }
 
-    // Dropoff pin (red) — shown only during in_progress
-    if (trip?.status == "in_progress" &&
-        trip.dropoffAddress != null) {
-        // Dropoff coords not yet in TripResponse — placeholder at driver location offset
-        // TODO: add pickup_lat, pickup_lng, dropoff_lat, dropoff_lng to TripResponse
-        // when those fields are added to the server, render pins here directly
-    }
-
     map.invalidate()
 }
 
+// ── Drawing helpers ───────────────────────────────────────────────────────────
+
 private fun circleDrawable(
-    context: android.content.Context,
+    context:  android.content.Context,
     colorInt: Int,
-    sizeDp: Int,
+    sizeDp:   Int,
 ): android.graphics.drawable.BitmapDrawable {
     val px  = (sizeDp * context.resources.displayMetrics.density).toInt().coerceAtLeast(8)
     val bmp = Bitmap.createBitmap(px, px, Bitmap.Config.ARGB_8888)
@@ -416,8 +501,8 @@ private fun circleDrawable(
         Paint(Paint.ANTI_ALIAS_FLAG).apply { color = colorInt })
     cvs.drawCircle(px / 2f, px / 2f, px / 2f - px * 0.09f,
         Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = android.graphics.Color.WHITE
-            style = Paint.Style.STROKE
+            color       = android.graphics.Color.WHITE
+            style       = Paint.Style.STROKE
             strokeWidth = px * 0.18f
         })
     return android.graphics.drawable.BitmapDrawable(context.resources, bmp)
@@ -444,7 +529,7 @@ private fun StatusStepper(status: String) {
             val isActive = index == currentIndex
             Column(
                 horizontalAlignment = Alignment.CenterHorizontally,
-                modifier = Modifier.weight(1f),
+                modifier            = Modifier.weight(1f),
             ) {
                 Surface(
                     shape    = CircleShape,
@@ -454,45 +539,63 @@ private fun StatusStepper(status: String) {
                     Box(contentAlignment = Alignment.Center, modifier = Modifier.fillMaxSize()) {
                         if (isActive && status != "completed") {
                             CircularProgressIndicator(
-                                color = Color.White, modifier = Modifier.size(18.dp),
-                                strokeWidth = 2.dp)
+                                color       = Color.White,
+                                modifier    = Modifier.size(18.dp),
+                                strokeWidth = 2.dp,
+                            )
                         } else {
-                            Icon(icon, null,
+                            Icon(
+                                icon, null,
                                 tint     = if (isDone) Color.White else Color(0xFFBBBBBB),
-                                modifier = Modifier.size(16.dp))
+                                modifier = Modifier.size(16.dp),
+                            )
                         }
                     }
                 }
                 Spacer(Modifier.height(4.dp))
-                Text(label, style = MaterialTheme.typography.labelSmall.copy(
-                    color      = if (isDone) PrimaryBlue else Color(0xFFAAAAAA),
-                    fontWeight = if (isActive) FontWeight.Bold else FontWeight.Normal),
-                    modifier = Modifier.padding(horizontal = 2.dp))
+                Text(
+                    label,
+                    style = MaterialTheme.typography.labelSmall.copy(
+                        color      = if (isDone) PrimaryBlue else Color(0xFFAAAAAA),
+                        fontWeight = if (isActive) FontWeight.Bold else FontWeight.Normal,
+                    ),
+                    modifier = Modifier.padding(horizontal = 2.dp),
+                )
             }
             if (index < steps.lastIndex) {
-                Box(modifier = Modifier
-                    .weight(0.3f).height(2.dp)
-                    .clip(RoundedCornerShape(1.dp))
-                    .background(if (index < currentIndex) PrimaryBlue else Color(0xFFEEEEEE)))
+                Box(
+                    modifier = Modifier
+                        .weight(0.3f).height(2.dp)
+                        .clip(RoundedCornerShape(1.dp))
+                        .background(if (index < currentIndex) PrimaryBlue else Color(0xFFEEEEEE)),
+                )
             }
         }
     }
 }
 
+// ── Detail row ────────────────────────────────────────────────────────────────
+
 @Composable
 private fun DetailRow(
-    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    icon:     androidx.compose.ui.graphics.vector.ImageVector,
     iconTint: Color,
-    label: String,
-    value: String,
+    label:    String,
+    value:    String,
 ) {
     Row(verticalAlignment = Alignment.Top, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
         Icon(icon, null, tint = iconTint, modifier = Modifier.size(16.dp))
         Column {
-            Text(label, style = MaterialTheme.typography.labelSmall.copy(color = Color(0xFFAAAAAA)))
+            Text(
+                label,
+                style = MaterialTheme.typography.labelSmall.copy(color = Color(0xFFAAAAAA)),
+            )
             Spacer(Modifier.height(2.dp))
-            Text(value, style = MaterialTheme.typography.bodySmall.copy(
-                color = Color(0xFF1A1A1A), fontWeight = FontWeight.Medium))
+            Text(
+                value,
+                style = MaterialTheme.typography.bodySmall.copy(
+                    color = Color(0xFF1A1A1A), fontWeight = FontWeight.Medium),
+            )
         }
     }
 }
