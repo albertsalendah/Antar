@@ -1,0 +1,36 @@
+# ==========================================
+# 1. GLOBAL & SERVER RULES (Antar-Server)
+# ==========================================
+.env
+*.env.local
+**/bin/
+**/*.exe
+**/*.out
+**/.qodo/
+
+# Ignore your secret JSON folder inside the server
+**/Antar-Server/etc/
+
+# Supabase Local Cache
+**/supabase/.temp/
+**/supabase/storage/
+
+# ==========================================
+# 2. INDEPENDENT MOBILE APP RULES (Rider & Driver)
+# ==========================================
+# The **/ prefix ensures these are caught inside ANY subfolder
+**/build/
+**/.gradle/
+**/local.properties
+**/app/google-services.json
+**/.idea/
+**/*.iml
+**/.cxx/
+**/.externalNativeBuild/
+**/captures/
+
+# ==========================================
+# 3. SYSTEM RULES
+# ==========================================
+*.DS_Store
+Thumbs.db
