@@ -419,11 +419,13 @@ func (h *Handler) UpdateLocation(c *gin.Context) {
 	}
 	result, err := h.db.Exec(context.Background(),
 		`UPDATE driver_profiles
-		 SET last_location = ST_SetSRID(ST_MakePoint($1,$2),4326),
-		     island_id     = resolve_island_id($1, $2),
-		     updated_at    = $3,
-		     is_online     = true
-		 WHERE id = $4`,
+     SET last_location = ST_SetSRID(ST_MakePoint($1,$2),4326),
+         last_lat      = $2,
+         last_lng      = $1,
+         island_id     = resolve_island_id($1, $2),
+         updated_at    = $3,
+         is_online     = true
+     WHERE id = $4`,
 		req.Longitude, req.Latitude, time.Now(), driverID,
 	)
 	if err != nil {

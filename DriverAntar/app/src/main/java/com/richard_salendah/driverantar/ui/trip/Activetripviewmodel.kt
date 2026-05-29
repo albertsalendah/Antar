@@ -8,6 +8,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.richard_salendah.driverantar.data.model.DriverTripResponse
 import com.richard_salendah.driverantar.data.remote.DriverRepository
+import com.richard_salendah.driverantar.ui.service.LocationService
 import com.richard_salendah.driverantar.ui.supabase.SupabaseClientHolder
 import com.richard_salendah.driverantar.utils.SessionManager
 import io.github.jan.supabase.postgrest.query.filter.FilterOperation
@@ -21,16 +22,15 @@ import kotlinx.coroutines.flow.launchIn
 import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.jsonPrimitive
+import org.osmdroid.util.GeoPoint
 
 sealed class ActiveTripUiState {
-    object Loading   : ActiveTripUiState()
-    object Idle      : ActiveTripUiState()
-    object Confirming : ActiveTripUiState()  // cancel confirm dialog visible
+    object Loading       : ActiveTripUiState()
+    object Idle          : ActiveTripUiState()
+    object Confirming    : ActiveTripUiState()
     object ActionLoading : ActiveTripUiState()
-    /** Trip completed — navigate to RateRider */
-    object Completed : ActiveTripUiState()
-    /** Trip cancelled — navigate back to Map */
-    object Cancelled : ActiveTripUiState()
+    object Completed     : ActiveTripUiState()
+    object Cancelled     : ActiveTripUiState()
     data class Error(val message: String) : ActiveTripUiState()
 }
 
@@ -42,11 +42,20 @@ class ActiveTripViewModel(
     var trip    by mutableStateOf<DriverTripResponse?>(null); private set
     var uiState by mutableStateOf<ActiveTripUiState>(ActiveTripUiState.Loading); private set
 
+    // ── Route state ───────────────────────────────────────────────────────────
+    var routePoints        by mutableStateOf<List<GeoPoint>>(emptyList()); private set
+    private var lastRouteFetchLat = 0.0
+    private var lastRouteFetchLng = 0.0
+
+    // ── Current driver GeoPoint for map marker ────────────────────────────────
+    var currentGeoPoint by mutableStateOf(GeoPoint(0.0, 0.0)); private set
+
     private var realtimeChannel: RealtimeChannel? = null
 
     init {
         loadTrip()
         subscribeToUpdates()
+        observeLocationForRouting()
     }
 
     // ── Data loading ──────────────────────────────────────────────────────────
@@ -64,15 +73,50 @@ class ActiveTripViewModel(
         }
     }
 
+    // ── Location observation → route refresh ──────────────────────────────────
+
+    private fun observeLocationForRouting() {
+        viewModelScope.launch {
+            LocationService.locationFlow.collect { location ->
+                currentGeoPoint = GeoPoint(location.latitude, location.longitude)
+                fetchRouteIfNeeded(location.latitude, location.longitude)
+            }
+        }
+    }
+
+    private fun fetchRouteIfNeeded(driverLat: Double, driverLng: Double) {
+        val t = trip ?: return
+        val moved = RouteHelper.distanceMeters(
+            driverLat, driverLng, lastRouteFetchLat, lastRouteFetchLng
+        )
+        if (moved < 50.0 && routePoints.isNotEmpty()) return
+
+        val (destLat, destLng) = when (t.status) {
+            "agreed"      -> Pair(t.pickup_lat, t.pickup_lng)
+            "in_progress" -> if (t.dropoff_lat != 0.0)
+                Pair(t.dropoff_lat, t.dropoff_lng)
+            else
+                Pair(t.pickup_lat, t.pickup_lng)
+            else          -> return
+        }
+        if (destLat == 0.0 && destLng == 0.0) return
+
+        lastRouteFetchLat = driverLat
+        lastRouteFetchLng = driverLng
+
+        viewModelScope.launch {
+            val pts = RouteHelper.fetchRoute(driverLat, driverLng, destLat?:0.0, destLng?:0.0)
+            if (pts != null) routePoints = pts
+        }
+    }
+
     // ── Realtime subscription ─────────────────────────────────────────────────
-    // Keeps the trip status in sync if anything changes server-side
-    // (e.g. rider cancels, admin intervention).
 
     private fun subscribeToUpdates() {
         viewModelScope.launch {
             try {
                 val client  = SupabaseClientHolder.client
-                val channel = client.channel("active-trip-$tripId")
+                val channel = client.channel("active-trip-$tripId-${System.currentTimeMillis()}")
                 realtimeChannel = channel
 
                 channel.postgresChangeFlow<PostgresAction.Update>(schema = "public") {
@@ -81,29 +125,29 @@ class ActiveTripViewModel(
                 }.onEach { action ->
                     val status = action.record["status"]?.jsonPrimitive?.content ?: return@onEach
                     Log.d(TAG, "Active trip status update → $status")
-                    // Reload full trip data when status changes
                     loadTrip()
                 }.launchIn(viewModelScope)
 
                 channel.subscribe()
             } catch (e: Exception) {
                 Log.w(TAG, "Realtime subscription failed for active trip", e)
-                // Non-fatal — driver can still act via buttons
             }
         }
     }
 
     // ── Trip actions ──────────────────────────────────────────────────────────
 
-    /**
-     * Start the trip — driver has arrived at pickup.
-     * Only valid when status = agreed.
-     */
     fun startTrip() {
         viewModelScope.launch {
             uiState = ActiveTripUiState.ActionLoading
             repository.startTrip(SessionManager.token, tripId)
-                .onSuccess { loadTrip() }
+                .onSuccess {
+                    loadTrip()
+                    // Reset route so it refetches toward dropoff after start
+                    routePoints        = emptyList()
+                    lastRouteFetchLat  = 0.0
+                    lastRouteFetchLng  = 0.0
+                }
                 .onFailure { e ->
                     uiState = ActiveTripUiState.Error(
                         e.message ?: "Failed to start trip — please try again"
@@ -112,10 +156,6 @@ class ActiveTripViewModel(
         }
     }
 
-    /**
-     * Complete the trip — driver has delivered the rider.
-     * Only valid when status = in_progress.
-     */
     fun completeTrip() {
         viewModelScope.launch {
             uiState = ActiveTripUiState.ActionLoading
@@ -129,28 +169,16 @@ class ActiveTripViewModel(
         }
     }
 
-    /** Show cancel confirmation dialog */
-    fun requestCancel() {
-        uiState = ActiveTripUiState.Confirming
-    }
+    fun requestCancel() { uiState = ActiveTripUiState.Confirming }
+    fun dismissCancel() { uiState = ActiveTripUiState.Idle }
 
-    fun dismissCancel() {
-        uiState = ActiveTripUiState.Idle
-    }
-
-    /**
-     * Confirm cancel — only valid when status = agreed (before start).
-     * Resets trip back to requested so another driver can pick it up.
-     */
     fun confirmCancel() {
         viewModelScope.launch {
             uiState = ActiveTripUiState.ActionLoading
             repository.cancelTrip(SessionManager.token, tripId)
                 .onSuccess { uiState = ActiveTripUiState.Cancelled }
                 .onFailure { e ->
-                    uiState = ActiveTripUiState.Error(
-                        e.message ?: "Failed to cancel trip"
-                    )
+                    uiState = ActiveTripUiState.Error(e.message ?: "Failed to cancel trip")
                 }
         }
     }
