@@ -140,7 +140,6 @@ class HomeViewModel(app: Application) : AndroidViewModel(app) {
             if (resp.isSuccessful) {
                 val drivers = resp.body()?.data ?: emptyList()
                 nearbyDrivers = drivers
-                // Compute per-type counts client-side from the driver list
                 countByType = drivers.groupingBy { it.vehicleType }.eachCount()
             }
         }
@@ -166,6 +165,7 @@ class HomeViewModel(app: Application) : AndroidViewModel(app) {
     fun cancelPickerMode() { pickerMode = PickerMode.None }
 
     // ── Geocoding ─────────────────────────────────────────────────────────────
+
     private fun reverseGeocode(lat: Double, lng: Double, onResult: (String) -> Unit) {
         viewModelScope.launch {
             val result = withContext(Dispatchers.IO) {
@@ -189,28 +189,36 @@ class HomeViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    /**
+     * Forward geocode: address string → lat/lng pair.
+     * Returns null if Nominatim finds nothing or the network call fails.
+     * Used by requestRide() as a pickup coord fallback and by map dropoff input.
+     */
+    private suspend fun geocode(address: String): Pair<Double, Double>? =
+        withContext(Dispatchers.IO) {
+            runCatching {
+                val encoded = java.net.URLEncoder.encode(address, "UTF-8")
+                val conn = java.net.URL(
+                    "https://nominatim.openstreetmap.org/search" +
+                            "?q=$encoded&format=json&limit=1&countrycodes=id"
+                ).openConnection() as java.net.HttpURLConnection
+                conn.setRequestProperty("User-Agent", "AntarRiderApp/1.0")
+                conn.connectTimeout = 6_000
+                conn.readTimeout    = 6_000
+                val arr = JSONArray(conn.inputStream.bufferedReader().readText())
+                if (arr.length() == 0) return@runCatching null
+                val obj = arr.getJSONObject(0)
+                Pair(obj.getDouble("lat"), obj.getDouble("lon"))
+            }.getOrNull()
+        }
+
     fun geocodeDropoff(address: String, onResult: (Double, Double) -> Unit) {
         viewModelScope.launch {
-            withContext(Dispatchers.IO) {
-                runCatching {
-                    val encoded = java.net.URLEncoder.encode(address, "UTF-8")
-                    val conn = java.net.URL(
-                        "https://nominatim.openstreetmap.org/search" +
-                                "?q=$encoded&format=json&limit=1&countrycodes=id"
-                    ).openConnection() as java.net.HttpURLConnection
-                    conn.setRequestProperty("User-Agent", "AntarRiderApp/1.0")
-                    conn.connectTimeout = 5_000
-                    conn.readTimeout    = 5_000
-                    val arr = JSONArray(conn.inputStream.bufferedReader().readText())
-                    if (arr.length() > 0) {
-                        val obj = arr.getJSONObject(0)
-                        Pair(obj.getDouble("lat"), obj.getDouble("lon"))
-                    } else null
-                }.getOrNull()
-            }?.let { (lat, lng) ->
-                dropoffLat = lat
-                dropoffLng = lng
-                onResult(lat, lng)
+            val coords = geocode(address)
+            if (coords != null) {
+                dropoffLat = coords.first
+                dropoffLng = coords.second
+                onResult(coords.first, coords.second)
             }
         }
     }
@@ -220,7 +228,7 @@ class HomeViewModel(app: Application) : AndroidViewModel(app) {
         selectedType == null                              -> "Pilih jenis kendaraan"
         pickupLat == 0.0 && pickupLng == 0.0             -> "Tentukan lokasi penjemputan"
         tripType == "transport" &&
-                dropoffLat == 0.0 && dropoffLng == 0.0       -> "Tentukan lokasi tujuan"
+                dropoffLat == 0.0 && dropoffLng == 0.0   -> "Tentukan lokasi tujuan"
         tripType == "errand" && note.isBlank()            -> "Isi keterangan keperluan"
         else                                              -> null
     }
@@ -232,12 +240,39 @@ class HomeViewModel(app: Application) : AndroidViewModel(app) {
             bookingLoading = true
             bookingError   = null
             runCatching {
+
+                // ── Fix B: geocode pickup if map tap hasn't set coords yet ────
+                // This happens when the rider typed an address but didn't tap the
+                // map, so pickupLat/pickupLng are still 0.0 from the text field.
+                if (pickupLat == 0.0 || pickupLng == 0.0) {
+                    if (pickupAddress.isBlank()) {
+                        onError("Masukkan alamat atau pilih lokasi penjemputan di peta")
+                        return@runCatching
+                    }
+                    val coords = geocode(pickupAddress)
+                    if (coords == null) {
+                        onError("Tidak dapat menemukan koordinat untuk alamat penjemputan. Coba pilih lokasi di peta.")
+                        return@runCatching
+                    }
+                    pickupLat = coords.first
+                    pickupLng = coords.second
+                }
+
+                // ── Geocode dropoff if coords are missing (transport only) ────
+                if (tripType == "transport" && (dropoffLat == 0.0 || dropoffLng == 0.0)) {
+                    val coords = geocode(dropoffAddress)
+                    dropoffLat = coords?.first  ?: pickupLat
+                    dropoffLng = coords?.second ?: pickupLng
+                }
+
                 val body = RequestRideRequest(
                     tripType       = tripType,
                     vehicleTypeId  = type.id,
                     pickupLat      = pickupLat,
                     pickupLng      = pickupLng,
-                    pickupAddress  = pickupAddress.ifBlank { "%.5f, %.5f".format(pickupLat, pickupLng) },
+                    pickupAddress  = pickupAddress.ifBlank {
+                        "%.5f, %.5f".format(pickupLat, pickupLng)
+                    },
                     dropoffLat     = if (tripType == "transport") dropoffLat  else null,
                     dropoffLng     = if (tripType == "transport") dropoffLng  else null,
                     dropoffAddress = if (tripType == "transport") dropoffAddress.ifBlank {
