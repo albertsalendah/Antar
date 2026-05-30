@@ -157,7 +157,7 @@ interface DriverApiService {
     ): Response<ApiResponse<Unit>>
 
     // ── Earnings (protected) ──────────────────────────────────────────────────
-    @GET("driver/earnings/daily")
+    @GET("api/v1/driver/earnings/daily")
     suspend fun getDailyEarnings(
         @Header("Authorization") token: String
     ): Response<ApiResponse<List<DailyEarning>>>

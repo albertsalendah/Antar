@@ -77,6 +77,9 @@ class ActiveTripViewModel(app: Application) : AndroidViewModel(app) {
                     if (driverLoc != null) {
                         fetchRouteIfNeeded(driverLoc.lat, driverLoc.lng, t)
                     }
+                    trip?.let { t -> driverLocation.value?.let { loc ->
+                        fetchRouteIfNeeded(loc.lat, loc.lng, t)
+                    }}
                 } else {
                     error = "Gagal memuat detail perjalanan"
                 }

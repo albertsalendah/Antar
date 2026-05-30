@@ -81,6 +81,8 @@ import java.util.Locale
 private val PrimaryBlue = Color(0xFF1B6CA8)
 private val AccentBlue  = Color(0xFF03A9F4)
 private val Red         = Color(0xFFE53935)
+private val Green       = Color(0xFF2E7D32)
+private val GreenLight  = Color(0xFFE8F5E9)
 
 @Composable
 fun ActiveTripScreen(
@@ -110,7 +112,7 @@ fun ActiveTripScreen(
         viewModel.start(tripId, onTripCompleted)
     }
 
-    // Centre map: on driver when agreed, midpoint between driver+dropoff when in_progress
+    // Centre map on driver when agreed, midpoint driver+dropoff when in_progress
     LaunchedEffect(driverLocation, trip?.status) {
         val map = mapView ?: return@LaunchedEffect
         val loc = driverLocation ?: return@LaunchedEffect
@@ -128,7 +130,7 @@ fun ActiveTripScreen(
         }
     }
 
-    // Refresh map overlays whenever driver moves, status changes, or route updates
+    // Refresh map overlays
     LaunchedEffect(driverLocation, trip, routePoints) {
         val map = mapView ?: return@LaunchedEffect
         updateOverlays(map, trip, driverLocation, routePoints)
@@ -240,17 +242,81 @@ fun ActiveTripScreen(
                             .navigationBarsPadding()
                             .padding(horizontal = 16.dp, vertical = 8.dp),
                     ) {
-                        // ── Always visible: status stepper ────────────────────
+                        // ── Status stepper ────────────────────────────────────
                         StatusStepper(status = trip.status)
 
-                        Spacer(Modifier.height(10.dp))
+                        Spacer(Modifier.height(8.dp))
+
+                        // ── Status message card ───────────────────────────────
+                        // Fix 2: show a contextual message based on current status
+                        when (trip.status) {
+                            "agreed" -> Card(
+                                modifier  = Modifier.fillMaxWidth(),
+                                shape     = RoundedCornerShape(10.dp),
+                                colors    = CardDefaults.cardColors(
+                                    containerColor = Color(0xFFE8F4FD)
+                                ),
+                                elevation = CardDefaults.cardElevation(0.dp),
+                            ) {
+                                Row(
+                                    modifier  = Modifier.padding(12.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                                ) {
+                                    CircularProgressIndicator(
+                                        color       = PrimaryBlue,
+                                        modifier    = Modifier.size(16.dp),
+                                        strokeWidth = 2.dp,
+                                    )
+                                    Text(
+                                        "Driver sedang menuju lokasi penjemputan Anda",
+                                        style = MaterialTheme.typography.bodySmall.copy(
+                                            color      = PrimaryBlue,
+                                            fontWeight = FontWeight.Medium,
+                                        ),
+                                    )
+                                }
+                            }
+                            "in_progress" -> Card(
+                                modifier  = Modifier.fillMaxWidth(),
+                                shape     = RoundedCornerShape(10.dp),
+                                colors    = CardDefaults.cardColors(
+                                    containerColor = GreenLight
+                                ),
+                                elevation = CardDefaults.cardElevation(0.dp),
+                            ) {
+                                Row(
+                                    modifier  = Modifier.padding(12.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                                ) {
+                                    Icon(
+                                        Icons.Default.DirectionsCar,
+                                        contentDescription = null,
+                                        tint     = Green,
+                                        modifier = Modifier.size(18.dp),
+                                    )
+                                    Text(
+                                        "Perjalanan berlangsung — Anda di dalam kendaraan",
+                                        style = MaterialTheme.typography.bodySmall.copy(
+                                            color      = Green,
+                                            fontWeight = FontWeight.Medium,
+                                        ),
+                                    )
+                                }
+                            }
+                        }
+
+                        Spacer(Modifier.height(8.dp))
 
                         // ── Expanded: fare + route detail ─────────────────────
                         if (sheetExpansion > 0.1f) {
                             Card(
                                 modifier  = Modifier.fillMaxWidth(),
                                 shape     = RoundedCornerShape(12.dp),
-                                colors    = CardDefaults.cardColors(containerColor = Color(0xFFF8F8F8)),
+                                colors    = CardDefaults.cardColors(
+                                    containerColor = Color(0xFFF8F8F8)
+                                ),
                                 elevation = CardDefaults.cardElevation(0.dp),
                             ) {
                                 Row(
@@ -277,8 +343,10 @@ fun ActiveTripScreen(
                                         Text(
                                             trip.paymentMethod.replaceFirstChar { it.uppercase() },
                                             style    = MaterialTheme.typography.labelMedium.copy(
-                                                color = PrimaryBlue, fontWeight = FontWeight.SemiBold),
-                                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                                                color = PrimaryBlue,
+                                                fontWeight = FontWeight.SemiBold),
+                                            modifier = Modifier.padding(
+                                                horizontal = 10.dp, vertical = 6.dp),
                                         )
                                     }
                                 }
@@ -289,7 +357,9 @@ fun ActiveTripScreen(
                             Card(
                                 modifier  = Modifier.fillMaxWidth(),
                                 shape     = RoundedCornerShape(12.dp),
-                                colors    = CardDefaults.cardColors(containerColor = Color(0xFFF8F8F8)),
+                                colors    = CardDefaults.cardColors(
+                                    containerColor = Color(0xFFF8F8F8)
+                                ),
                                 elevation = CardDefaults.cardElevation(0.dp),
                             ) {
                                 Column(modifier = Modifier.padding(14.dp)) {
@@ -425,12 +495,10 @@ private fun updateOverlays(
 
     // ── Route line ────────────────────────────────────────────────────────────
     if (routePoints.isNotEmpty()) {
-        // Blue when heading to pickup, red when in progress toward dropoff
         val lineColor = if (status == "in_progress")
             android.graphics.Color.parseColor("#E53935")
         else
             android.graphics.Color.parseColor("#1B6CA8")
-
         Polyline(map).apply {
             setPoints(routePoints)
             outlinePaint.apply {
@@ -444,7 +512,7 @@ private fun updateOverlays(
         }
     }
 
-    // ── Pickup pin (PrimaryBlue) — always visible ─────────────────────────────
+    // ── Pickup pin — always visible ───────────────────────────────────────────
     if (trip.pickupLat != 0.0) {
         Marker(map).apply {
             id       = "pickup"
@@ -457,7 +525,7 @@ private fun updateOverlays(
         }
     }
 
-    // ── Dropoff pin (Red) — only for transport trips when in_progress ─────────
+    // ── Dropoff pin — transport + in_progress only ────────────────────────────
     if (status == "in_progress" &&
         trip.tripType == "transport" &&
         trip.dropoffLat != 0.0) {
@@ -472,13 +540,20 @@ private fun updateOverlays(
         }
     }
 
-    // ── Driver pin (AccentBlue, moving) ───────────────────────────────────────
+    // ── Driver / vehicle pin ──────────────────────────────────────────────────
+    // Fix 5: when in_progress rider is inside the vehicle — show combined marker
     driverLoc?.let { loc ->
         Marker(map).apply {
             id       = "driver"
             position = GeoPoint(loc.lat, loc.lng)
-            title    = trip.driverName.ifEmpty { "Driver" }
-            icon     = circleDrawable(map.context, 0xFF03A9F4.toInt(), 32)
+            // When in_progress both rider and driver are in the same vehicle
+            title    = if (status == "in_progress") "Kendaraan Anda" else trip.driverName.ifEmpty { "Driver" }
+            icon     = circleDrawable(
+                map.context,
+                if (status == "in_progress") 0xFF2E7D32.toInt()  // green = vehicle carrying rider
+                else 0xFF03A9F4.toInt(),                           // blue = driver heading to pickup
+                32,
+            )
             setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_CENTER)
             map.overlays.add(this)
         }
@@ -567,7 +642,9 @@ private fun StatusStepper(status: String) {
                     modifier = Modifier
                         .weight(0.3f).height(2.dp)
                         .clip(RoundedCornerShape(1.dp))
-                        .background(if (index < currentIndex) PrimaryBlue else Color(0xFFEEEEEE)),
+                        .background(
+                            if (index < currentIndex) PrimaryBlue else Color(0xFFEEEEEE)
+                        ),
                 )
             }
         }

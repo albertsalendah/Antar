@@ -5,7 +5,7 @@
 
 ---
 
-## Migrations Applied (Supabase — all 22 applied)
+## Migrations Applied (Supabase — all applied)
 
 | Migration | Description |
 |---|---|
@@ -36,7 +36,7 @@
 ### Driver Endpoints
 - Profile CRUD + avatar upload to Supabase Storage (RLS via user JWT)
 - Vehicle management (add, list, update, delete, set-active)
-- Location update: writes PostGIS point + island_id via resolve_island_id() + sets is_online=true
+- Location update: writes PostGIS point + last_lat/last_lng + island_id + sets is_online=true
 - Offline endpoint
 - FCM token save
 - Vehicle types (enabled only)
@@ -56,7 +56,7 @@
 - Reject offer → back to requested, resets all negotiation counters
 - Counter offer: floor enforced, rider counter limit enforced, FCM to driver
 - Cancel trip (requested status only)
-- Active trip + trip list + single trip (all with driver lat/lng via ST_Y/ST_X join)
+- Active trip + trip list + single trip (all with driver lat/lng + pickup/dropoff coords via ST_Y/ST_X join)
 - Rate driver (1-5 stars)
 
 ### Admin Endpoints
@@ -80,11 +80,11 @@
 | Screen | Notes |
 |---|---|
 | Login | Blue header branding, inline error |
-| Register | Email confirm dialog, password mismatch validation |
-| Home | OSMDroid full-screen map, vehicle type chips with online count, trip type toggle, pickup/dropoff pin-tap via PickerMode, 2-step bottom sheet (form → summary), nearby driver polling every 5s, active trip recovery on load |
+| Register | Email confirm dialog, password mismatch validation, confirm password field present |
+| Home | OSMDroid full-screen map, vehicle type chips with online count, trip type toggle, pickup/dropoff pin-tap via PickerMode, 2-step bottom sheet (form → summary), nearby driver polling every 5s, active trip recovery on load, pickup geocode fallback when coords are zero |
 | Searching | Radar animation (3 staggered rings), Realtime + 5s polling fallback, cancel with confirm dialog |
-| Negotiation | Fare display, round counter, counter input field, accept/counter/reject, Realtime + 5s polling |
-| ActiveTrip | Full-screen OSMDroid map, draggable bottom sheet, driver pin polling every 3s, OSRM road route (>50m re-fetch threshold), pickup/dropoff pins, status stepper, call button |
+| Negotiation | Fare display, round counter, counter input field, accept/counter/reject, Realtime + 5s polling, counter exhausted message |
+| ActiveTrip | Full-screen OSMDroid map, draggable bottom sheet, driver pin polling every 3s, OSRM road route fixed (triggers on trip load + location), status message card (on-the-way/in-vehicle), combined green marker when in_progress, pickup/dropoff pins, status stepper, call button |
 | TripComplete | Trip summary card, fare display, rate prompt |
 | RateDriver | 5-star selector, optional comment, haptic on tap |
 | TripHistory | Paginated (20/page), shimmer skeleton, pull-to-refresh, infinite scroll, rate button |
@@ -116,7 +116,7 @@
 | OfferPrice | Fare stepper (+/- 1000 IDR), floor price enforcement, trip summary card |
 | WaitingForRider | Realtime subscription (timestamp-suffixed channel name), spinning clock animation, shows offered fare |
 | CounterDecision | Accept/Counter/Reject rider's counter, fare stepper, driver counter limit display, floor enforcement |
-| ActiveTrip | Trip detail (rider info, call button, addresses, fare, start/complete/cancel), map pending (TODO-3) |
+| ActiveTrip | Full-screen OSMDroid map, draggable bottom sheet, driver position pin, OSRM road route (>50m re-fetch threshold, resets on startTrip), pickup/dropoff pins, status stepper, rider info + call button, fare card, address card, complete button only enabled within 150m of dropoff |
 | RateRider | 5-star tap selector, optional comment, skip option |
 | TripHistory | Paginated, skeleton, infinite scroll, rate button for unrated completed trips |
 
@@ -132,11 +132,36 @@
 - `WaitingForRiderViewModel`: timestamp suffix on Realtime channel name to prevent reuse conflict
 - `SupabaseClientHolder`: singleton Supabase client for Realtime only (auth handled by Go server)
 - FCM service (`AntarDriverMessagingService`): `new_trip` → IncomingTrips, `offer_accepted` → ActiveTrip
+- `RouteHelper`: OSRM road routing, Haversine 50m re-fetch threshold
 - Haptic feedback on offer submit, complete, etc.
 
 ---
 
-## Known Bugs Fixed
+## Completed TODOs
+
+| Item | What was done |
+|---|---|
+| TODO-1 | Pickup/dropoff coords already present in rider server + Android code — was already done before tracking |
+| TODO-2 | Driver `UpdateLocation` SQL now writes `last_lat` and `last_lng` alongside PostGIS `last_location` |
+| TODO-3 | Driver `ActiveTripScreen` rewritten with full-screen map + draggable bottom sheet + OSRM routing via new `RouteHelper.kt` |
+
+---
+
+## Bug Fixes & Small Improvements
+
+| Fix | Issue | Solution |
+|---|---|---|
+| E | `getDailyEarnings` 404 — URL missing `api/v1/` prefix | Changed `@GET("driver/earnings/daily")` to `@GET("api/v1/driver/earnings/daily")` in `DriverApiService.kt` |
+| 1 | Rider ActiveTrip route line never shows | `observeLocationForRouting()` returned early when trip was null on first location emit. Fixed by also calling `fetchRouteIfNeeded` inside `loadTrip()` once trip is populated |
+| 2 | Rider has no feedback that driver is on the way | Added contextual status message card below stepper: blue spinner card when `agreed`, green card when `in_progress` |
+| 4 | Driver "Selesaikan Perjalanan" button shows immediately on trip start | Added `canComplete` computed property in `ActiveTripViewModel` — button only enabled within 150m of dropoff. Errand trips always enabled (no fixed dropoff) |
+| 5 | Only driver marker moves when in_progress; rider marker stays at pickup | When `in_progress`, suppress separate rider marker. Show single green combined marker at driver position titled "Kendaraan Anda" indicating rider is inside the vehicle |
+| A | Rider negotiation counter button still visible when rounds exhausted | Added `counterExhausted` state to `NegotiationViewModel`; hides button and shows message when server returns exhausted error |
+| B | HomeScreen validate() passes when pickup address typed but coords are zero | Added pickup geocode fallback in `requestRide()` — geocodes pickup address if coords are still 0.0, returns error to user if geocoding fails |
+
+---
+
+## Known Bugs Fixed (historical)
 
 | Bug | Root Cause | Fix Applied |
 |---|---|---|
@@ -147,8 +172,8 @@
 | NegotiationScreen 500 when trip is null | `tripSelect` missing ::text casts | Added ::text casts + null-trip error branch in screen |
 | `java.util.Properties` unresolved in build.gradle.kts | Missing import | Added `import java.util.Properties` and `import java.io.FileInputStream` |
 | WaitingForRider Realtime channel reuse conflict | Channel name collision on back-navigate | Added `System.currentTimeMillis()` suffix to channel name |
-| Stale is_online=true after app kill | LocationService.onDestroy not called by OS on force-kill | `isRunning` static flag checked in MapViewModel.refreshProfile() to detect and clean up stale state |
-| Driver map marker doesn't recenter after navigating back | `AndroidView` recreated, initialCenterDone resets | `initialCenterDone` is `remember { mutableStateOf(false) }` — resets per composition, re-centers on first GPS fix |
+| Stale is_online=true after app kill | LocationService.onDestroy not called by OS on force-kill | `isRunning` static flag checked in MapViewModel.refreshProfile() |
+| Driver map marker doesn't recenter after navigating back | `AndroidView` recreated, initialCenterDone resets | `initialCenterDone` resets per composition, re-centers on first GPS fix |
 | islands and driver_notification_queue had no RLS | Tables created without RLS enabled | RLS enabled with appropriate policies via migration |
 
 ---
@@ -159,5 +184,6 @@
 - **Islands:** Karakelang 3000m, Kabaruan 1500m, Salibabu 1000m, Sara Besar 500m, Sara Kecil 300m — all with real GeoJSON polygon boundaries
 - **Payment methods:** Cash (enabled), Bank Transfer (disabled), E-Wallet (disabled)
 - **Negotiation setting:** max_negotiation_rounds = 6 (rider gets 3, driver gets 3)
-- **All 22 migrations applied**, no pending migrations
+- **All migrations applied**, no pending migrations
 - **RLS enabled** on all public tables including islands and driver_notification_queue
+- **last_lat / last_lng** columns on driver_profiles now populated on every location update

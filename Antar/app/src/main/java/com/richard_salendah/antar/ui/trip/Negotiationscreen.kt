@@ -250,16 +250,28 @@ fun NegotiationScreen(
                         }
                     }
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        OutlinedButton(
-                            onClick  = { viewModel.showCounter = true },
-                            modifier = Modifier.weight(1f).height(48.dp),
-                            shape    = RoundedCornerShape(12.dp),
-                            colors   = ButtonDefaults.outlinedButtonColors(contentColor = PrimaryBlue),
-                        ) {
-                            Icon(Icons.Default.SwapVert, null, modifier = Modifier.size(16.dp))
-                            Spacer(Modifier.width(4.dp))
-                            Text("Tawar", fontWeight = FontWeight.SemiBold)
+                        if (!viewModel.counterExhausted) {
+                            OutlinedButton(
+                                onClick  = { viewModel.showCounter = true },
+                                modifier = Modifier.weight(1f).height(48.dp),
+                                shape    = RoundedCornerShape(12.dp),
+                                colors   = ButtonDefaults.outlinedButtonColors(contentColor = PrimaryBlue),
+
+                                ) {
+                                Icon(Icons.Default.SwapVert, null, modifier = Modifier.size(16.dp))
+                                Spacer(Modifier.width(4.dp))
+                                Text("Tawar", fontWeight = FontWeight.SemiBold)
+                            }
+                        } else {
+                            Text(
+                                "Kesempatan tawar habis — terima atau tolak penawaran",
+                                style    = MaterialTheme.typography.labelSmall,
+                                color    = MaterialTheme.colorScheme.error,
+                                modifier = Modifier.fillMaxWidth(),
+                                textAlign = TextAlign.Center,
+                            )
                         }
+
                         OutlinedButton(
                             onClick = {
                                 haptic.perform(HapticType.Tick) // ← haptic on reject

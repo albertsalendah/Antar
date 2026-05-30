@@ -50,6 +50,17 @@ class ActiveTripViewModel(
     // ── Current driver GeoPoint for map marker ────────────────────────────────
     var currentGeoPoint by mutableStateOf(GeoPoint(0.0, 0.0)); private set
 
+    val canComplete: Boolean
+        get() {
+            val t = trip ?: return false
+            if (t.trip_type == "errand" || t.dropoff_lat == 0.0) return true
+            if (currentGeoPoint.latitude == 0.0) return false
+            return RouteHelper.distanceMeters(
+                currentGeoPoint.latitude, currentGeoPoint.longitude,
+                t.dropoff_lat ?: 0.0, t.dropoff_lng ?: 0.0
+            ) < 150.0
+        }
+
     private var realtimeChannel: RealtimeChannel? = null
 
     init {

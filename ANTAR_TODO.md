@@ -6,313 +6,330 @@
 
 ## Priority Order
 
-1. [TODO-1] Add pickup/dropoff coords to rider `TripResponse` (server + Android) — *unblocks map routing*
-2. [TODO-2] Driver `UpdateLocation` — write `last_lat`/`last_lng` columns — *unblocks Option B*
-3. [TODO-3] Driver `ActiveTripScreen` — add map + routing (matches rider app)
-4. [TODO-4] Option B — Realtime driver location in rider app *(do when app is stable)*
+1. [TODO-5] Add `arrived` status — "driver arrived at pickup" flow (server + both apps)
+2. [TODO-6] Rider negotiation screen — replace text input with +/- stepper like driver app
+3. [TODO-4] Option B — Realtime driver location in rider app *(do when app is stable on production)*
 
 ---
 
-## TODO-1 — Add pickup/dropoff coords to rider TripResponse
+## TODO-5 — Add `arrived` status to trip flow
 
-**Why:** Rider `ActiveTripScreen` has a map but `TripResponse` has no pickup/dropoff coordinates, so it can't draw pickup/dropoff pins or compute OSRM routes. The trips table stores these as PostGIS geography columns — they need to be extracted with `ST_Y`/`ST_X` in the query.
+**Why:** Currently the flow jumps agreed → in_progress with no intermediate "driver arrived" state.
+The driver has no way to notify the rider they've arrived, and the rider has no feedback.
 
-### Server — `internal/rider/handler.go`
+**New flow:** agreed → arrived → in_progress → completed
 
-In the `tripSelect` constant, add 4 columns after the `driver_lat`/`driver_lng` lines:
+### Step 1 — Server: Migration
 
-```go
-// Add after:  COALESCE(ST_X(dp.last_location::geometry), 0) AS driver_lng,
-COALESCE(ST_Y(t.pickup_location::geometry),  0) AS pickup_lat,
-COALESCE(ST_X(t.pickup_location::geometry),  0) AS pickup_lng,
-COALESCE(ST_Y(t.dropoff_location::geometry), 0) AS dropoff_lat,
-COALESCE(ST_X(t.dropoff_location::geometry), 0) AS dropoff_lng,
+```sql
+ALTER TYPE trip_status ADD VALUE IF NOT EXISTS 'arrived' AFTER 'agreed';
 ```
 
-In `scanTrip()`, add 4 scan targets after `&t.DriverLat, &t.DriverLng`:
+### Step 2 — Server: New endpoint `internal/driver/routes.go`
+
+Add inside the auth group:
 ```go
-&t.PickupLat, &t.PickupLng, &t.DropoffLat, &t.DropoffLng,
+auth.POST("/trips/:trip_id/arrive", h.ArriveAtPickup)
 ```
 
-### Server — `internal/rider/model.go`
+### Step 3 — Server: Handler `internal/driver/handler.go`
 
-Add to `TripResponse` struct:
 ```go
-PickupLat  float64 `json:"pickup_lat"`
-PickupLng  float64 `json:"pickup_lng"`
-DropoffLat float64 `json:"dropoff_lat"`
-DropoffLng float64 `json:"dropoff_lng"`
+func (h *Handler) ArriveAtPickup(c *gin.Context) {
+    tripID   := c.Param("trip_id")
+    driverID, _ := c.Get("userID")
+
+    var riderID string
+    err := h.db.QueryRow(context.Background(),
+        `UPDATE trips SET status = 'arrived', updated_at = $1
+         WHERE id = $2 AND driver_id = $3 AND status = 'agreed'
+         RETURNING rider_id`,
+        time.Now(), tripID, driverID,
+    ).Scan(&riderID)
+    if err != nil {
+        response.BadRequest(c, "Trip cannot be marked arrived — must be 'agreed' and assigned to you")
+        return
+    }
+
+    go func() {
+        var riderToken string
+        h.db.QueryRow(context.Background(),
+            `SELECT COALESCE(fcm_token,'') FROM rider_profiles WHERE id = $1`, riderID,
+        ).Scan(&riderToken)
+        if riderToken != "" {
+            h.fcm.Send(context.Background(), fcm.Message{
+                Token: riderToken,
+                Notification: &fcm.Notification{
+                    Title: "Driver Sudah Tiba! 🚗",
+                    Body:  "Driver Anda sudah tiba di lokasi penjemputan",
+                },
+                Data: map[string]string{
+                    "type":    "driver_arrived",
+                    "trip_id": tripID,
+                },
+            })
+        }
+    }()
+
+    response.Success(c, gin.H{"message": "Marked as arrived"})
+}
 ```
 
-### Android — `data/remote/model/Models.kt`
+### Step 4 — Server: StartTrip handler — update status check
 
-Add to `TripResponse` data class:
+```go
+// In StartTrip, change WHERE clause from:
+WHERE id = $2 AND driver_id = $3 AND status = 'agreed'
+// To:
+WHERE id = $2 AND driver_id = $3 AND status = 'arrived'
+```
+
+### Step 5 — Server: `internal/driver/model.go` — add to API reference
+
+Add to `DriverApiService`:
+```
+POST /trips/:id/arrive  🔒  agreed → arrived; FCM to rider
+```
+
+### Step 6 — Driver app: `DriverApiService.kt`
+
 ```kotlin
-@SerializedName("pickup_lat")  val pickupLat:  Double = 0.0,
-@SerializedName("pickup_lng")  val pickupLng:  Double = 0.0,
-@SerializedName("dropoff_lat") val dropoffLat: Double = 0.0,
-@SerializedName("dropoff_lng") val dropoffLng: Double = 0.0,
+@POST("api/v1/driver/trips/{trip_id}/arrive")
+suspend fun arriveAtPickup(
+    @Header("Authorization") token: String,
+    @Path("trip_id") tripId: String
+): Response<ApiResponse<Unit>>
 ```
 
----
+### Step 7 — Driver app: `DriverRepository.kt`
 
-## TODO-2 — Driver UpdateLocation — write last_lat/last_lng
+```kotlin
+suspend fun arriveAtPickup(token: String, tripId: String): Result<Unit> = safeCall {
+    api.arriveAtPickup(token, tripId).unwrapVoid()
+}
+```
 
-**Why:** `driver_profiles` already has `last_lat` and `last_lng` double precision columns (confirmed in DB). The Go handler currently only writes `last_location` (PostGIS geography). Writing the plain float columns enables Option B Realtime — the Supabase SDK can broadcast clean float values over WebSocket without needing PostGIS deserialization on the client.
+### Step 8 — Driver app: `ActiveTripViewModel.kt`
 
-### Server — `internal/driver/handler.go`
+Add new action:
+```kotlin
+fun arriveAtPickup() {
+    viewModelScope.launch {
+        uiState = ActiveTripUiState.ActionLoading
+        repository.arriveAtPickup(SessionManager.token, tripId)
+            .onSuccess { loadTrip() }
+            .onFailure { e ->
+                uiState = ActiveTripUiState.Error(e.message ?: "Failed to mark arrived")
+            }
+    }
+}
+```
 
-In `UpdateLocation`, change the SQL in `h.db.Exec`:
-```go
-result, err := h.db.Exec(context.Background(),
-    `UPDATE driver_profiles
-     SET last_location = ST_SetSRID(ST_MakePoint($1,$2),4326),
-         last_lat      = $2,
-         last_lng      = $1,
-         island_id     = resolve_island_id($1, $2),
-         updated_at    = $3,
-         is_online     = true
-     WHERE id = $4`,
-    req.Longitude, req.Latitude, time.Now(), driverID,
+### Step 9 — Driver app: `ActiveTripScreen.kt`
+
+Replace `"agreed"` action button block with:
+```kotlin
+"agreed" -> {
+    Button(
+        onClick  = { viewModel.arriveAtPickup() },
+        enabled  = !isLoading,
+        modifier = Modifier.fillMaxWidth().height(52.dp),
+    ) {
+        if (isLoading) CircularProgressIndicator(...)
+        else Text("Saya Sudah Tiba di Lokasi")
+    }
+    OutlinedButton(
+        onClick  = { viewModel.requestCancel() },
+        enabled  = !isLoading,
+        modifier = Modifier.fillMaxWidth().height(48.dp),
+        colors   = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.error),
+    ) { Text("Batalkan Trip") }
+}
+
+"arrived" -> {
+    // Green "arrived" status card
+    Card(
+        colors   = CardDefaults.cardColors(containerColor = Color(0xFFE8F5E9)),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Row(modifier = Modifier.padding(12.dp), ...) {
+            Icon(Icons.Default.Check, null, tint = Color(0xFF2E7D32))
+            Text("Anda sudah tiba — tunggu penumpang naik", color = Color(0xFF2E7D32))
+        }
+    }
+    Button(
+        onClick  = { haptic...; viewModel.startTrip() },
+        enabled  = !isLoading,
+        modifier = Modifier.fillMaxWidth().height(52.dp),
+    ) {
+        if (isLoading) CircularProgressIndicator(...)
+        else Text("Mulai Perjalanan")
+    }
+}
+```
+
+### Step 10 — Driver app: `ActiveTripScreen.kt` — update TripStatusStepper
+
+Add `arrived` step between agreed and in_progress:
+```kotlin
+val steps = listOf(
+    Triple("agreed",      "Menuju Penumpang",   Icons.Default.Person),
+    Triple("arrived",     "Sudah Tiba",         Icons.Default.Check),
+    Triple("in_progress", "Dalam Perjalanan",   Icons.Default.DirectionsCar),
+    Triple("completed",   "Sampai Tujuan",      Icons.Default.LocationOn),
 )
 ```
-*(Note: PostGIS MakePoint takes lng first, lat second. last_lat = $2 = Latitude, last_lng = $1 = Longitude.)*
+
+### Step 11 — Rider app: `ActiveTripScreen.kt`
+
+Add `"arrived"` to status stepper steps (same as driver above).
+
+Update status message card to handle `"arrived"`:
+```kotlin
+"arrived" -> Card(
+    colors = CardDefaults.cardColors(containerColor = Color(0xFFE8F5E9)),
+    ...
+) {
+    Row(...) {
+        Icon(Icons.Default.DirectionsCar, tint = Color(0xFF2E7D32))
+        Text(
+            "Driver sudah tiba! Segera menuju kendaraan",
+            color = Color(0xFF2E7D32), fontWeight = FontWeight.SemiBold,
+        )
+    }
+}
+```
+
+### Step 12 — Rider app: `SearchingViewModel.kt` and `NegotiationViewModel.kt`
+
+No change needed — `arrived` is after the negotiation phase.
+
+### Step 13 — Both apps: trip recovery
+
+Add `"arrived"` to active trip recovery in:
+- Rider `HomeViewModel.checkActiveTrip()`:
+  ```kotlin
+  "arrived" -> Screen.ActiveTrip.route(tripId)
+  ```
+- Driver `MapViewModel.recoverActiveTrip()`:
+  ```kotlin
+  trip.status == "arrived" -> Screen.ActiveTrip.route(trip.id)
+  ```
+
+### Step 14 — Rider app: FCM handling
+
+In `RiderFirebaseMessagingService.kt`, add `driver_arrived` type:
+```kotlin
+"driver_arrived" -> if (tripId.isNotEmpty()) DeepLinkEvent.ToActiveTrip(tripId) else null
+```
 
 ---
 
-## TODO-3 — Driver ActiveTripScreen — Map + Routing
+## TODO-6 — Rider negotiation screen: replace text input with +/- stepper
 
-**Why:** Driver `ActiveTripScreen` exists with trip detail UI but has no map. It needs to show driver position + pickup/dropoff pins + OSRM road route, consistent with the rider app.
+**Why:** The rider's `NegotiationScreen` uses a plain text input for counter offers.
+The driver app uses a +/- stepper with 1000 IDR steps which is much easier on mobile.
+Make the rider screen consistent with the driver's `CounterDecisionScreen`.
 
-`DriverTripResponse` already has `pickup_lat`, `pickup_lng`, `dropoff_lat`, `dropoff_lng` — no server change needed.
+### Changes needed — `NegotiationViewModel.kt` (rider)
 
-### Step 1 — Create `RouteHelper.kt` in `ui/trip/`
-
-New file. Identical logic to rider app's `OsrmRouteHelper.kt`:
-
+Add stepper state alongside existing `counterInput`:
 ```kotlin
-package com.richard_salendah.driverantar.ui.trip
+var counterFare     by mutableStateOf(0.0)
+var showCounter     by mutableStateOf(false)   // already exists
 
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
-import org.json.JSONObject
-import org.osmdroid.util.GeoPoint
-import java.net.HttpURLConnection
-import java.net.URL
-import kotlin.math.*
+// Init counterFare when trip loads (default_fare as floor — need to pass from server)
+// Set it when showCounter becomes true:
+fun openCounter() {
+    counterFare  = trip?.offeredFare ?: 0.0   // start at current offer as suggestion
+    showCounter  = true
+}
 
-object RouteHelper {
-
-    suspend fun fetchRoute(
-        originLat: Double, originLng: Double,
-        destLat: Double, destLng: Double,
-    ): List<GeoPoint>? = withContext(Dispatchers.IO) {
-        if (originLat == 0.0 && originLng == 0.0) return@withContext null
-        if (destLat == 0.0 && destLng == 0.0) return@withContext null
-        runCatching {
-            val url = "https://router.project-osrm.org/route/v1/driving/" +
-                "$originLng,$originLat;$destLng,$destLat" +
-                "?overview=full&geometries=geojson"
-            val conn = URL(url).openConnection() as HttpURLConnection
-            conn.setRequestProperty("User-Agent", "AntarDriverApp/1.0")
-            conn.connectTimeout = 6_000
-            conn.readTimeout    = 6_000
-            val json   = JSONObject(conn.inputStream.bufferedReader().readText())
-            val routes = json.getJSONArray("routes")
-            if (routes.length() == 0) return@runCatching null
-            val coords = routes.getJSONObject(0)
-                .getJSONObject("geometry")
-                .getJSONArray("coordinates")
-            (0 until coords.length()).map { i ->
-                val pt = coords.getJSONArray(i)
-                GeoPoint(pt.getDouble(1), pt.getDouble(0)) // OSRM gives [lng, lat]
-            }
-        }.getOrNull()
-    }
-
-    fun distanceMeters(lat1: Double, lng1: Double, lat2: Double, lng2: Double): Double {
-        if (lat2 == 0.0 && lng2 == 0.0) return Double.MAX_VALUE
-        val r    = 6_371_000.0
-        val dLat = Math.toRadians(lat2 - lat1)
-        val dLng = Math.toRadians(lng2 - lng1)
-        val a    = sin(dLat / 2).pow(2) +
-                cos(Math.toRadians(lat1)) * cos(Math.toRadians(lat2)) * sin(dLng / 2).pow(2)
-        return r * 2 * atan2(sqrt(a), sqrt(1 - a))
-    }
+fun incrementCounter() { counterFare += 1_000.0 }
+fun decrementCounter() {
+    // floor = defaultFare from fare_rules — need to expose via TripResponse or separate call
+    // For now use offeredFare as soft floor; server will enforce the hard floor
+    if (counterFare - 1_000.0 > 0) counterFare -= 1_000.0
 }
 ```
 
-### Step 2 — Update `ActiveTripViewModel.kt` (driver)
+### Changes needed — `NegotiationScreen.kt` (rider)
 
-Add route state and fetch logic alongside existing trip + Realtime code:
-
+Replace the `OutlinedTextField` + digit-filter inside the counter card with a stepper row:
 ```kotlin
-// Add these state vars:
-var routePoints by mutableStateOf<List<GeoPoint>>(emptyList()); private set
-private var lastRouteFetchLat = 0.0
-private var lastRouteFetchLng = 0.0
-
-// Add this function:
-fun fetchRouteIfNeeded(driverLat: Double, driverLng: Double) {
-    val t = trip ?: return
-    val moved = RouteHelper.distanceMeters(driverLat, driverLng, lastRouteFetchLat, lastRouteFetchLng)
-    if (moved < 50.0 && routePoints.isNotEmpty()) return
-
-    val (destLat, destLng) = when (t.status) {
-        "agreed"      -> Pair(t.pickup_lat, t.pickup_lng)
-        "in_progress" -> if (t.dropoff_lat != 0.0) Pair(t.dropoff_lat, t.dropoff_lng)
-                         else Pair(t.pickup_lat, t.pickup_lng)
-        else          -> return
-    }
-    if (destLat == 0.0 && destLng == 0.0) return
-
-    lastRouteFetchLat = driverLat
-    lastRouteFetchLng = driverLng
-    viewModelScope.launch {
-        val pts = RouteHelper.fetchRoute(driverLat, driverLng, destLat, destLng)
-        if (pts != null) routePoints = pts
-    }
-}
-```
-
-In `init {}`, observe `LocationService.locationFlow` to trigger route updates:
-```kotlin
-viewModelScope.launch {
-    LocationService.locationFlow.collect { location ->
-        fetchRouteIfNeeded(location.latitude, location.longitude)
-    }
-}
-```
-
-### Step 3 — Rewrite `ActiveTripScreen.kt` (driver)
-
-Replace the existing screen with full-screen OSMDroid map + draggable bottom sheet (same pattern as rider `ActiveTripScreen`).
-
-**Layout structure:**
-```
-Box(fillMaxSize) {
-    AndroidView(MapView, fillMaxSize)         ← full-screen map
-    FloatingActionButton(recenter, bottomEnd) ← above sheet
-    Box(bottomSheet, draggable) {
-        DragHandle
-        Column(scrollable) {
-            // Collapsed: TripStatusHeader + DriverRiderInfoCard + ActionButtons
-            // Expanded: + FareCard + AddressCard
-        }
-    }
-}
-CancelConfirmDialog (if uiState == Confirming)
-```
-
-**Map overlay update function** (call from `LaunchedEffect(driverGeoPoint, trip, routePoints)`):
-```kotlin
-private fun updateOverlays(
-    map: MapView,
-    trip: DriverTripResponse?,
-    driverGeoPoint: GeoPoint,
-    routePoints: List<GeoPoint>,
+// Replace text field with:
+Row(
+    verticalAlignment     = Alignment.CenterVertically,
+    horizontalArrangement = Arrangement.Center,
+    modifier              = Modifier.fillMaxWidth()
 ) {
-    map.overlays.removeAll { it is Marker || it is Polyline }
+    FilledTonalButton(
+        onClick        = { viewModel.decrementCounter() },
+        modifier       = Modifier.size(52.dp),
+        contentPadding = PaddingValues(0.dp),
+        shape          = RoundedCornerShape(12.dp),
+    ) { Text("−", fontSize = 22.sp, fontWeight = FontWeight.Bold) }
 
-    // Route line
-    if (routePoints.isNotEmpty()) {
-        val lineColor = if (trip?.status == "in_progress")
-            android.graphics.Color.parseColor("#E53935")
-        else android.graphics.Color.parseColor("#1B6CA8")
-        Polyline(map).apply {
-            setPoints(routePoints)
-            outlinePaint.color       = lineColor
-            outlinePaint.strokeWidth = 8f
-            outlinePaint.isAntiAlias = true
-            outlinePaint.strokeCap   = android.graphics.Paint.Cap.ROUND
-            outlinePaint.strokeJoin  = android.graphics.Paint.Join.ROUND
-            map.overlays.add(this)
-        }
-    }
+    Spacer(Modifier.width(16.dp))
 
-    // Pickup pin (always visible)
-    trip?.let { t ->
-        if (t.pickup_lat != 0.0) {
-            Marker(map).apply {
-                position = GeoPoint(t.pickup_lat, t.pickup_lng)
-                title    = "Jemput: ${t.rider_name}"
-                snippet  = t.pickup_address
-                icon     = circleDrawable(map.context, 0xFF1B6CA8.toInt(), 30)
-                setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_BOTTOM)
-                map.overlays.add(this)
-            }
-        }
-        // Dropoff pin (transport + in_progress only)
-        if (t.status == "in_progress" && t.trip_type == "transport" && t.dropoff_lat != 0.0) {
-            Marker(map).apply {
-                position = GeoPoint(t.dropoff_lat, t.dropoff_lng)
-                title    = "Tujuan"
-                snippet  = t.dropoff_address ?: ""
-                icon     = circleDrawable(map.context, 0xFFE53935.toInt(), 30)
-                setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_BOTTOM)
-                map.overlays.add(this)
-            }
-        }
-    }
+    OutlinedTextField(
+        value         = viewModel.counterFare.roundToInt().toString(),
+        onValueChange = { v ->
+            v.filter { it.isDigit() }.toDoubleOrNull()?.let { viewModel.counterFare = it }
+        },
+        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+        textStyle = LocalTextStyle.current.copy(
+            fontSize   = 24.sp,
+            fontWeight = FontWeight.Bold,
+            textAlign  = TextAlign.Center,
+        ),
+        singleLine = true,
+        modifier   = Modifier.width(160.dp),
+        prefix     = { Text("Rp") },
+    )
 
-    // Driver pin (moving)
-    if (driverGeoPoint.latitude != 0.0) {
-        Marker(map).apply {
-            position = driverGeoPoint
-            title    = "Posisi Anda"
-            icon     = circleDrawable(map.context, 0xFF03A9F4.toInt(), 32)
-            setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_CENTER)
-            map.overlays.add(this)
-        }
-    }
-    map.invalidate()
+    Spacer(Modifier.width(16.dp))
+
+    FilledTonalButton(
+        onClick        = { viewModel.incrementCounter() },
+        modifier       = Modifier.size(52.dp),
+        contentPadding = PaddingValues(0.dp),
+        shape          = RoundedCornerShape(12.dp),
+    ) { Text("+", fontSize = 22.sp, fontWeight = FontWeight.Bold) }
 }
 
-// circleDrawable helper (same as rider app)
-private fun circleDrawable(context: android.content.Context, colorInt: Int, sizeDp: Int)
-    : android.graphics.drawable.BitmapDrawable {
-    val px  = (sizeDp * context.resources.displayMetrics.density).toInt().coerceAtLeast(8)
-    val bmp = android.graphics.Bitmap.createBitmap(px, px, android.graphics.Bitmap.Config.ARGB_8888)
-    val cvs = android.graphics.Canvas(bmp)
-    cvs.drawCircle(px / 2f, px / 2f, px / 2f,
-        android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply { color = colorInt })
-    cvs.drawCircle(px / 2f, px / 2f, px / 2f - px * 0.09f,
-        android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
-            color       = android.graphics.Color.WHITE
-            style       = android.graphics.Paint.Style.STROKE
-            strokeWidth = px * 0.18f
-        })
-    return android.graphics.drawable.BitmapDrawable(context.resources, bmp)
-}
+Spacer(Modifier.height(4.dp))
+Text(
+    "Ketuk + / − untuk ubah Rp 1.000",
+    style = MaterialTheme.typography.labelSmall,
+    color = MaterialTheme.colorScheme.onSurfaceVariant,
+    modifier = Modifier.fillMaxWidth(),
+    textAlign = TextAlign.Center,
+)
 ```
 
-**Bottom sheet content (collapsed — always visible):**
-- Trip status pill (agreed = "Menuju Penumpang", in_progress = "Perjalanan Berlangsung")
-- Rider name + phone + call button
-- Fare + payment method
-- Start / Complete / Cancel buttons (based on status)
-
-**Bottom sheet content (expanded — additional):**
-- Pickup address row
-- Dropoff address row (transport) or errand note card (errand)
+Update `submitCounter()` to use `counterFare` instead of `counterInput`:
+```kotlin
+fun submitCounter(tripId: String) {
+    val fare = counterFare
+    if (fare <= 0) { error = "Masukkan nominal yang valid"; return }
+    // rest stays the same, replace counterInput.trim().toDoubleOrNull() with fare
+}
+```
 
 ---
 
 ## TODO-4 — Option B: Realtime Driver Location in Rider App
 
 **Do this after the app is stable on production.**
-**Prerequisites:** TODO-2 must be done first (last_lat/last_lng written by server).
+**Prerequisites:** TODO-2 is done (last_lat/last_lng now written by server on every location update).**
 
 ### Step 1 — Supabase SQL (one migration)
 ```sql
--- Allow riders to subscribe to driver location changes
 CREATE POLICY "riders can read driver location"
-ON driver_profiles FOR SELECT
-TO authenticated
-USING (true);
+ON driver_profiles FOR SELECT TO authenticated USING (true);
 ```
-*(trips table is already in the Realtime publication from migration `20260426175721`)*
-*(Add driver_profiles to Realtime publication via Supabase Dashboard → Database → Replication)*
+Add `driver_profiles` to Realtime publication via Supabase Dashboard → Database → Replication.
 
 ### Step 2 — Implement `RealtimeLocationTracker` in rider `LocationTracker.kt`
 
@@ -355,7 +372,7 @@ class RealtimeLocationTracker(
 // BEFORE
 private val locationTracker: LocationTracker = PollingLocationTracker(api, intervalMs = 3_000L)
 
-// AFTER (get driverProfileId from trip.driverId once trip loads)
+// AFTER
 private val locationTracker: LocationTracker = RealtimeLocationTracker(
     api             = api,
     supabase        = supabase,

@@ -49,6 +49,7 @@ import java.util.Locale
 import kotlin.math.roundToInt
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.text.style.TextAlign
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -280,11 +281,11 @@ fun ActiveTripScreen(
 
                                 "in_progress" -> {
                                     Button(
-                                        onClick = {
+                                        onClick  = {
                                             haptic.performHapticFeedback(HapticFeedbackType.LongPress)
                                             viewModel.completeTrip()
                                         },
-                                        enabled  = !isLoading,
+                                        enabled  = !isLoading && viewModel.canComplete,  // ← changed
                                         modifier = Modifier.fillMaxWidth().height(52.dp),
                                         colors   = ButtonDefaults.buttonColors(
                                             containerColor = MaterialTheme.colorScheme.tertiary,
@@ -298,6 +299,15 @@ fun ActiveTripScreen(
                                             "Selesaikan Perjalanan",
                                             style = MaterialTheme.typography.titleMedium,
                                             color = MaterialTheme.colorScheme.onTertiary,
+                                        )
+                                    }
+                                    if (!viewModel.canComplete) {                         // ← add this
+                                        Text(
+                                            "Tersedia saat mendekati lokasi tujuan",
+                                            style    = MaterialTheme.typography.labelSmall,
+                                            color    = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            modifier = Modifier.fillMaxWidth(),
+                                            textAlign = TextAlign.Center,
                                         )
                                     }
                                 }

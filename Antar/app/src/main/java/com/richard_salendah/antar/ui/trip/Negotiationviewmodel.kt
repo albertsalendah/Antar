@@ -35,6 +35,7 @@ class NegotiationViewModel(app: Application) : AndroidViewModel(app) {
     var counterInput  by mutableStateOf("")
     var showCounter   by mutableStateOf(false)
 
+    var counterExhausted by mutableStateOf(false)
     private var channel: RealtimeChannel? = null
     private var pollJob: Job?             = null
 
@@ -173,7 +174,9 @@ class NegotiationViewModel(app: Application) : AndroidViewModel(app) {
                     val t = api.getTrip(tripId)
                     if (t.isSuccessful) trip = t.body()?.data
                 } else {
-                    error = parseError(resp.errorBody()?.string()) ?: "Gagal menawar, coba lagi"
+                    val msg = parseError(resp.errorBody()?.string()) ?: "Gagal menawar, coba lagi"
+                    error = msg
+                    if (msg.contains("attempts") || msg.contains("Anda telah")) counterExhausted = true
                 }
             }.onFailure { error = "Tidak dapat terhubung ke server" }
             actionLoading = false
