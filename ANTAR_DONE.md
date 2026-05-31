@@ -84,7 +84,7 @@
 | Register | Email confirm dialog, password mismatch validation, confirm password field present |
 | Home | OSMDroid full-screen map, vehicle type chips with online count, trip type toggle, pickup/dropoff pin-tap via PickerMode, 2-step bottom sheet (form → summary), nearby driver polling every 5s, active trip recovery on load, pickup geocode fallback when coords are zero |
 | Searching | Radar animation (3 staggered rings), Realtime + 5s polling fallback, cancel with confirm dialog |
-| Negotiation | Fare display, round counter, counter input field, accept/counter/reject, Realtime + 5s polling, counter exhausted message |
+| Negotiation | Fare display, round counter, **+/- stepper** (1000 IDR steps, matches driver app), accept/counter/reject, Realtime + 5s polling, counter exhausted message |
 | ActiveTrip | Full-screen OSMDroid map, draggable bottom sheet, driver pin polling every 3s, OSRM road route fixed (triggers on trip load + location), **4-step status stepper** (agreed→arrived→in_progress→completed), status message cards (on-the-way / driver-arrived amber / in-vehicle green), amber marker when arrived, combined green marker when in_progress, pickup/dropoff pins, call button |
 | TripComplete | Trip summary card, fare display, rate prompt |
 | RateDriver | 5-star selector, optional comment, haptic on tap |
@@ -146,6 +146,7 @@
 | TODO-2 | Driver `UpdateLocation` SQL now writes `last_lat` and `last_lng` alongside PostGIS `last_location` |
 | TODO-3 | Driver `ActiveTripScreen` rewritten with full-screen map + draggable bottom sheet + OSRM routing via new `RouteHelper.kt` |
 | TODO-5 | Added `arrived` trip status (DB migration + server endpoint `ArriveAtPickup` + FCM to rider + both app screens updated with 4-step stepper and arrived UI state) |
+| TODO-6 | Rider negotiation screen — replaced plain text input with +/- stepper (1000 IDR steps), matching driver app's CounterDecisionScreen UX |
 
 ---
 
