@@ -855,7 +855,7 @@ func (h *Handler) GetActiveTrip(c *gin.Context) {
 		 LEFT JOIN rider_profiles  rp ON rp.id = t.rider_id
 		 LEFT JOIN payment_methods pm ON pm.id = t.payment_method_id
 		 WHERE (t.driver_id = $1 OR t.offered_by = $1)
-		   AND t.status IN ('offered','agreed','in_progress')
+		   AND t.status IN ('offered','agreed','arrived','in_progress')
 		 ORDER BY t.updated_at DESC LIMIT 1`,
 		driverID,
 	).Scan(
