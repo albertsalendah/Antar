@@ -55,6 +55,7 @@ class RiderFirebaseMessagingService : FirebaseMessagingService() {
             "driver_offer",
             "driver_counter" -> if (tripId.isNotEmpty()) DeepLinkEvent.ToNegotiation(tripId) else null
             "offer_accepted" -> if (tripId.isNotEmpty()) DeepLinkEvent.ToActiveTrip(tripId)  else null
+            "driver_arrived" -> if (tripId.isNotEmpty()) DeepLinkEvent.ToActiveTrip(tripId) else null
             else             -> null
         }
         event?.let { DeepLinkHandler.emit(it) }
@@ -96,6 +97,7 @@ class RiderFirebaseMessagingService : FirebaseMessagingService() {
         "driver_offer"   -> "Ada Penawaran Harga!"
         "driver_counter" -> "Driver Balik Menawar!"
         "offer_accepted" -> "Penawaran Diterima!"
+        "driver_arrived" -> "Driver Sudah Tiba!"
         else             -> "Antar"
     }
 

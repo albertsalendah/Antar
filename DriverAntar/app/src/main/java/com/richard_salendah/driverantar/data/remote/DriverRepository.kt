@@ -115,6 +115,10 @@ class DriverRepository(private val api: DriverApiService) {
         api.startTrip(token, tripId).unwrapVoid()
     }
 
+    suspend fun arriveAtPickup(token: String, tripId: String): Result<Unit> = safeCall {
+        api.arriveAtPickup(token, tripId).unwrapVoid()
+    }
+
     suspend fun completeTrip(token: String, tripId: String): Result<Unit> = safeCall {
         api.completeTrip(token, tripId).unwrapVoid()
     }

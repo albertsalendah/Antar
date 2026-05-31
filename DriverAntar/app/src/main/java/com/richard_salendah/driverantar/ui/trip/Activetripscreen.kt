@@ -32,6 +32,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -49,7 +50,6 @@ import java.util.Locale
 import kotlin.math.roundToInt
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.platform.LocalHapticFeedback
-import androidx.compose.ui.text.style.TextAlign
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -191,7 +191,6 @@ fun ActiveTripScreen(
                 }
 
                 when {
-                    // ── Loading ───────────────────────────────────────────────
                     uiState is ActiveTripUiState.Loading || trip == null -> {
                         Box(
                             modifier = Modifier.fillMaxWidth().padding(32.dp),
@@ -199,12 +198,9 @@ fun ActiveTripScreen(
                         ) { CircularProgressIndicator(color = Color(0xFF1B6CA8)) }
                     }
 
-                    // ── Error ─────────────────────────────────────────────────
                     uiState is ActiveTripUiState.Error -> {
                         Column(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(24.dp),
+                            modifier = Modifier.fillMaxWidth().padding(24.dp),
                             horizontalAlignment = Alignment.CenterHorizontally,
                         ) {
                             Text(
@@ -217,7 +213,6 @@ fun ActiveTripScreen(
                         }
                     }
 
-                    // ── Active content ────────────────────────────────────────
                     else -> {
                         Column(
                             modifier = Modifier
@@ -227,13 +222,13 @@ fun ActiveTripScreen(
                                 .padding(horizontal = 16.dp, vertical = 8.dp),
                             verticalArrangement = Arrangement.spacedBy(10.dp),
                         ) {
-                            // Status stepper — always visible
+                            // Status stepper
                             TripStatusStepper(status = trip.status)
 
-                            // Rider info card — always visible
+                            // Rider info card
                             RiderInfoCard(
-                                trip    = trip,
-                                onCall  = {
+                                trip   = trip,
+                                onCall = {
                                     val phone  = trip.rider_phone.ifEmpty { null }
                                     val intent = if (phone != null)
                                         Intent(Intent.ACTION_DIAL, Uri.parse("tel:$phone"))
@@ -248,10 +243,69 @@ fun ActiveTripScreen(
                                 AddressCard(trip = trip)
                             }
 
-                            // Action buttons — always visible
+                            // ── Action buttons ────────────────────────────────
                             val isLoading = uiState is ActiveTripUiState.ActionLoading
+
                             when (trip.status) {
+
+                                // ── agreed: heading to pickup ─────────────────
                                 "agreed" -> {
+                                    Button(
+                                        onClick = {
+                                            haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                                            viewModel.arriveAtPickup()
+                                        },
+                                        enabled  = !isLoading,
+                                        modifier = Modifier.fillMaxWidth().height(52.dp),
+                                    ) {
+                                        if (isLoading) CircularProgressIndicator(
+                                            Modifier.size(20.dp), strokeWidth = 2.dp,
+                                            color = MaterialTheme.colorScheme.onPrimary,
+                                        )
+                                        else Text(
+                                            "Saya Sudah Tiba di Lokasi",
+                                            style = MaterialTheme.typography.titleMedium,
+                                        )
+                                    }
+                                    OutlinedButton(
+                                        onClick  = { viewModel.requestCancel() },
+                                        enabled  = !isLoading,
+                                        modifier = Modifier.fillMaxWidth().height(48.dp),
+                                        colors   = ButtonDefaults.outlinedButtonColors(
+                                            contentColor = MaterialTheme.colorScheme.error,
+                                        ),
+                                    ) { Text("Batalkan Trip") }
+                                }
+
+                                // ── arrived: waiting for rider to board ───────
+                                "arrived" -> {
+                                    Card(
+                                        colors   = CardDefaults.cardColors(
+                                            containerColor = Color(0xFFE8F5E9)
+                                        ),
+                                        modifier = Modifier.fillMaxWidth(),
+                                        shape    = RoundedCornerShape(12.dp),
+                                    ) {
+                                        Row(
+                                            modifier = Modifier.padding(14.dp),
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.spacedBy(10.dp),
+                                        ) {
+                                            Icon(
+                                                Icons.Default.Check,
+                                                contentDescription = null,
+                                                tint     = Color(0xFF2E7D32),
+                                                modifier = Modifier.size(20.dp),
+                                            )
+                                            Text(
+                                                "Anda sudah tiba — tunggu penumpang naik",
+                                                style = MaterialTheme.typography.bodyMedium.copy(
+                                                    color      = Color(0xFF2E7D32),
+                                                    fontWeight = FontWeight.SemiBold,
+                                                ),
+                                            )
+                                        }
+                                    }
                                     Button(
                                         onClick = {
                                             haptic.performHapticFeedback(HapticFeedbackType.LongPress)
@@ -269,23 +323,16 @@ fun ActiveTripScreen(
                                             style = MaterialTheme.typography.titleMedium,
                                         )
                                     }
-                                    OutlinedButton(
-                                        onClick  = { viewModel.requestCancel() },
-                                        enabled  = !isLoading,
-                                        modifier = Modifier.fillMaxWidth().height(48.dp),
-                                        colors   = ButtonDefaults.outlinedButtonColors(
-                                            contentColor = MaterialTheme.colorScheme.error,
-                                        ),
-                                    ) { Text("Batalkan Trip") }
                                 }
 
+                                // ── in_progress: heading to dropoff ──────────
                                 "in_progress" -> {
                                     Button(
-                                        onClick  = {
+                                        onClick = {
                                             haptic.performHapticFeedback(HapticFeedbackType.LongPress)
                                             viewModel.completeTrip()
                                         },
-                                        enabled  = !isLoading && viewModel.canComplete,  // ← changed
+                                        enabled  = !isLoading && viewModel.canComplete,
                                         modifier = Modifier.fillMaxWidth().height(52.dp),
                                         colors   = ButtonDefaults.buttonColors(
                                             containerColor = MaterialTheme.colorScheme.tertiary,
@@ -301,12 +348,12 @@ fun ActiveTripScreen(
                                             color = MaterialTheme.colorScheme.onTertiary,
                                         )
                                     }
-                                    if (!viewModel.canComplete) {                         // ← add this
+                                    if (!viewModel.canComplete) {
                                         Text(
                                             "Tersedia saat mendekati lokasi tujuan",
-                                            style    = MaterialTheme.typography.labelSmall,
-                                            color    = MaterialTheme.colorScheme.onSurfaceVariant,
-                                            modifier = Modifier.fillMaxWidth(),
+                                            style     = MaterialTheme.typography.labelSmall,
+                                            color     = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            modifier  = Modifier.fillMaxWidth(),
                                             textAlign = TextAlign.Center,
                                         )
                                     }
@@ -349,9 +396,10 @@ fun ActiveTripScreen(
 @Composable
 private fun TripStatusStepper(status: String) {
     val steps = listOf(
-        Triple("agreed",      "Menuju Penumpang",   Icons.Default.Person),
-        Triple("in_progress", "Dalam Perjalanan",   Icons.Default.DirectionsCar),
-        Triple("completed",   "Sampai Tujuan",      Icons.Default.LocationOn),
+        Triple("agreed",      "Menuju Penumpang",  Icons.Default.Person),
+        Triple("arrived",     "Sudah Tiba",        Icons.Default.Check),
+        Triple("in_progress", "Dalam Perjalanan",  Icons.Default.DirectionsCar),
+        Triple("completed",   "Sampai Tujuan",     Icons.Default.LocationOn),
     )
     val currentIndex = steps.indexOfFirst { it.first == status }.coerceAtLeast(0)
 
@@ -370,37 +418,38 @@ private fun TripStatusStepper(status: String) {
                 Surface(
                     shape    = CircleShape,
                     color    = if (isDone) Color(0xFF1B6CA8) else Color(0xFFEEEEEE),
-                    modifier = Modifier.size(if (isActive) 40.dp else 32.dp),
+                    modifier = Modifier.size(if (isActive) 36.dp else 28.dp),
                 ) {
                     Box(contentAlignment = Alignment.Center, modifier = Modifier.fillMaxSize()) {
                         if (isActive && status != "completed") {
                             CircularProgressIndicator(
                                 color       = Color.White,
-                                modifier    = Modifier.size(18.dp),
+                                modifier    = Modifier.size(16.dp),
                                 strokeWidth = 2.dp,
                             )
                         } else {
                             Icon(
                                 icon, null,
                                 tint     = if (isDone) Color.White else Color(0xFFBBBBBB),
-                                modifier = Modifier.size(16.dp),
+                                modifier = Modifier.size(14.dp),
                             )
                         }
                     }
                 }
-                Spacer(Modifier.height(4.dp))
+                Spacer(Modifier.height(3.dp))
                 Text(
                     label,
                     style = MaterialTheme.typography.labelSmall.copy(
                         color      = if (isDone) Color(0xFF1B6CA8) else Color(0xFFAAAAAA),
                         fontWeight = if (isActive) FontWeight.Bold else FontWeight.Normal,
                     ),
+                    textAlign = TextAlign.Center,
                 )
             }
             if (index < steps.lastIndex) {
                 Box(
                     modifier = Modifier
-                        .weight(0.3f).height(2.dp)
+                        .weight(0.2f).height(2.dp)
                         .clip(RoundedCornerShape(1.dp))
                         .background(
                             if (index < currentIndex) Color(0xFF1B6CA8) else Color(0xFFEEEEEE)
@@ -511,7 +560,6 @@ private fun AddressCard(trip: DriverTripResponse) {
         shadowElevation = 1.dp,
     ) {
         Column(modifier = Modifier.padding(14.dp)) {
-            // Errand note
             if (!trip.note.isNullOrBlank()) {
                 Card(
                     colors   = CardDefaults.cardColors(
@@ -581,7 +629,6 @@ private fun updateOverlays(
 ) {
     map.overlays.removeAll { it is Marker || it is Polyline }
 
-    // Route line
     if (routePoints.isNotEmpty()) {
         val lineColor = if (trip?.status == "in_progress")
             android.graphics.Color.parseColor("#E53935")
@@ -599,7 +646,6 @@ private fun updateOverlays(
     }
 
     trip?.let { t ->
-        // Pickup pin — always visible
         if (t.pickup_lat != 0.0) {
             Marker(map).apply {
                 position = GeoPoint(t.pickup_lat, t.pickup_lng)
@@ -610,10 +656,9 @@ private fun updateOverlays(
                 map.overlays.add(this)
             }
         }
-        // Dropoff pin — transport + in_progress only
         if (t.status == "in_progress" && t.trip_type == "transport" && t.dropoff_lat != 0.0) {
             Marker(map).apply {
-                position = GeoPoint(t.dropoff_lat ?: 0.0, t.dropoff_lng?:0.0)
+                position = GeoPoint(t.dropoff_lat ?: 0.0, t.dropoff_lng ?: 0.0)
                 title    = "Tujuan"
                 snippet  = t.dropoff_address ?: ""
                 icon     = circleDrawable(map.context, 0xFFE53935.toInt(), 30)
@@ -623,7 +668,6 @@ private fun updateOverlays(
         }
     }
 
-    // Driver pin — moving
     if (driverPoint.latitude != 0.0) {
         Marker(map).apply {
             position = driverPoint
@@ -655,8 +699,6 @@ private fun circleDrawable(
         })
     return android.graphics.drawable.BitmapDrawable(context.resources, bmp)
 }
-
-// ── Formatters ────────────────────────────────────────────────────────────────
 
 private fun formatRupiah(amount: Double): String {
     val fmt = NumberFormat.getNumberInstance(Locale("id", "ID"))

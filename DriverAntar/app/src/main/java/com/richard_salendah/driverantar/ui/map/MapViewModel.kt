@@ -58,7 +58,7 @@ class MapViewModel(private val repository: DriverRepository) : ViewModel() {
                             )
                         trip.status == "offered" && trip.last_offer_by == "rider" ->
                             Screen.IncomingTrips.route
-                        trip.status == "agreed" || trip.status == "in_progress" ->
+                        trip.status == "agreed" || trip.status == "arrived" || trip.status == "in_progress" ->
                             Screen.ActiveTrip.route(trip.id)
                         else -> null
                     }

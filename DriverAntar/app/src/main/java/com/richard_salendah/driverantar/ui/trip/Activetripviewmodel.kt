@@ -167,6 +167,17 @@ class ActiveTripViewModel(
         }
     }
 
+    fun arriveAtPickup() {
+        viewModelScope.launch {
+            uiState = ActiveTripUiState.ActionLoading
+            repository.arriveAtPickup(SessionManager.token, tripId)
+                .onSuccess { loadTrip() }
+                .onFailure { e ->
+                    uiState = ActiveTripUiState.Error(e.message ?: "Failed to mark arrived")
+                }
+        }
+    }
+
     fun completeTrip() {
         viewModelScope.launch {
             uiState = ActiveTripUiState.ActionLoading

@@ -79,7 +79,7 @@ fun AntarNavGraph(
                     val dest = when (status) {
                         "requested"             -> Screen.Searching.route(tripId)
                         "offered"               -> Screen.Negotiation.route(tripId)
-                        "agreed", "in_progress" -> Screen.ActiveTrip.route(tripId)
+                        "agreed", "arrived", "in_progress" -> Screen.ActiveTrip.route(tripId)
                         else                    -> null
                     }
                     dest?.let { navController.navigate(it) { popUpTo(Screen.Home.route) } }

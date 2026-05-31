@@ -27,20 +27,56 @@ class NegotiationViewModel(app: Application) : AndroidViewModel(app) {
     private val api      = (app as Antar).apiService
     private val supabase = (app as Antar).supabase
 
+    companion object {
+        private const val STEP = 1_000.0
+    }
+
     var trip          by mutableStateOf<TripResponse?>(null)
     var loading       by mutableStateOf(false)
     var actionLoading by mutableStateOf(false)
     var error         by mutableStateOf<String?>(null)
 
-    var counterInput  by mutableStateOf("")
-    var showCounter   by mutableStateOf(false)
-
+    var showCounter      by mutableStateOf(false)
     var counterExhausted by mutableStateOf(false)
+
+    /**
+     * Current fare value in the stepper.
+     * Initialised to the driver's offered fare when the counter panel opens
+     * so the rider starts from the current offer as a reference point.
+     * The server enforces the hard floor (default_fare); we don't block
+     * the stepper at a floor here since we don't have that value client-side.
+     */
+    var counterFare by mutableStateOf(0.0)
+        private set
+
     private var channel: RealtimeChannel? = null
     private var pollJob: Job?             = null
 
-    // Internal — exposed so NegotiationScreen retry button can reset it
+    // Internal — exposed so NegotiationScreen can guard against duplicate start
     var started = false
+
+    // ── Stepper helpers ───────────────────────────────────────────────────────
+
+    fun openCounter() {
+        // Pre-fill stepper with driver's offered fare as a sensible starting point
+        counterFare = trip?.offeredFare ?: 0.0
+        showCounter = true
+    }
+
+    fun incrementCounter() {
+        counterFare += STEP
+    }
+
+    fun decrementCounter() {
+        val next = counterFare - STEP
+        if (next > 0) counterFare = next
+    }
+    @JvmName("updateCounterFare")
+    fun setCounterFare(value: Double) {
+        counterFare = value
+    }
+
+    // ── Lifecycle ─────────────────────────────────────────────────────────────
 
     fun start(
         tripId: String,
@@ -160,23 +196,28 @@ class NegotiationViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    /**
+     * Submit the counter using [counterFare] from the stepper.
+     * Server enforces the fare floor — if below it returns an error which
+     * we surface directly to the rider.
+     */
     fun submitCounter(tripId: String) {
-        val fare = counterInput.trim().toDoubleOrNull()
-        if (fare == null || fare <= 0) { error = "Masukkan nominal yang valid"; return }
+        if (counterFare <= 0) { error = "Masukkan nominal yang valid"; return }
         viewModelScope.launch {
             actionLoading = true
             error         = null
             runCatching {
-                val resp = api.counterOffer(tripId, CounterOfferRequest(fare))
+                val resp = api.counterOffer(tripId, CounterOfferRequest(counterFare))
                 if (resp.isSuccessful) {
-                    showCounter  = false
-                    counterInput = ""
+                    showCounter = false
                     val t = api.getTrip(tripId)
                     if (t.isSuccessful) trip = t.body()?.data
                 } else {
                     val msg = parseError(resp.errorBody()?.string()) ?: "Gagal menawar, coba lagi"
                     error = msg
-                    if (msg.contains("attempts") || msg.contains("Anda telah")) counterExhausted = true
+                    if (msg.contains("attempts") || msg.contains("Anda telah")) {
+                        counterExhausted = true
+                    }
                 }
             }.onFailure { error = "Tidak dapat terhubung ke server" }
             actionLoading = false

@@ -134,6 +134,12 @@ interface DriverApiService {
         @Path("trip_id") tripId: String
     ): Response<ApiResponse<Unit>>
 
+    @POST("api/v1/driver/trips/{trip_id}/arrive")
+    suspend fun arriveAtPickup(
+        @Header("Authorization") token: String,
+        @Path("trip_id") tripId: String
+    ): Response<ApiResponse<Unit>>
+
     /** Moves trip from in_progress → completed. */
     @POST("api/v1/driver/trips/{trip_id}/complete")
     suspend fun completeTrip(

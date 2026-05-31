@@ -736,7 +736,7 @@ func (h *Handler) StartTrip(c *gin.Context) {
 	driverID, _ := c.Get("userID")
 	result, err := h.db.Exec(context.Background(),
 		`UPDATE trips SET status = 'in_progress', updated_at = $1
-		 WHERE id = $2 AND driver_id = $3 AND status = 'agreed'`,
+		 WHERE id = $2 AND driver_id = $3 AND status = 'arrived'`,
 		time.Now(), tripID, driverID,
 	)
 	if err != nil {
@@ -749,6 +749,47 @@ func (h *Handler) StartTrip(c *gin.Context) {
 		return
 	}
 	response.Success(c, gin.H{"message": "Trip started"})
+}
+
+func (h *Handler) ArriveAtPickup(c *gin.Context) {
+	tripID := c.Param("trip_id")
+	driverID, _ := c.Get("userID")
+
+	var riderID string
+	err := h.db.QueryRow(context.Background(),
+		`UPDATE trips SET status = 'arrived', updated_at = $1
+         WHERE id = $2 AND driver_id = $3 AND status = 'agreed'
+         RETURNING rider_id`,
+		time.Now(), tripID, driverID,
+	).Scan(&riderID)
+	if err != nil {
+		response.BadRequest(c, "Trip cannot be marked arrived — must be 'agreed' and assigned to you")
+		return
+	}
+
+	go func() {
+		var riderToken string
+		h.db.QueryRow(context.Background(),
+			`SELECT COALESCE(fcm_token,'') FROM rider_profiles WHERE id = $1`, riderID,
+		).Scan(&riderToken)
+		if riderToken != "" {
+			if err := h.fcm.Send(context.Background(), fcm.Message{
+				Token: riderToken,
+				Notification: &fcm.Notification{
+					Title: "Driver Sudah Tiba! 🚗",
+					Body:  "Driver Anda sudah tiba di lokasi penjemputan",
+				},
+				Data: map[string]string{
+					"type":    "driver_arrived",
+					"trip_id": tripID,
+				},
+			}); err != nil {
+				slog.Warn("FCM notify rider of arrival failed", "error", err)
+			}
+		}
+	}()
+
+	response.Success(c, gin.H{"message": "Marked as arrived"})
 }
 
 func (h *Handler) CompleteTrip(c *gin.Context) {

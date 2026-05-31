@@ -79,10 +79,11 @@ import java.text.NumberFormat
 import java.util.Locale
 
 private val PrimaryBlue = Color(0xFF1B6CA8)
-private val AccentBlue  = Color(0xFF03A9F4)
 private val Red         = Color(0xFFE53935)
 private val Green       = Color(0xFF2E7D32)
 private val GreenLight  = Color(0xFFE8F5E9)
+private val AmberLight  = Color(0xFFFFF8E1)
+private val Amber       = Color(0xFFF57F17)
 
 @Composable
 fun ActiveTripScreen(
@@ -112,12 +113,12 @@ fun ActiveTripScreen(
         viewModel.start(tripId, onTripCompleted)
     }
 
-    // Centre map on driver when agreed, midpoint driver+dropoff when in_progress
+    // Centre map on driver; midpoint driver+dropoff when in_progress
     LaunchedEffect(driverLocation, trip?.status) {
         val map = mapView ?: return@LaunchedEffect
         val loc = driverLocation ?: return@LaunchedEffect
         when (trip?.status) {
-            "agreed"      -> map.controller.animateTo(GeoPoint(loc.lat, loc.lng))
+            "agreed", "arrived" -> map.controller.animateTo(GeoPoint(loc.lat, loc.lng))
             "in_progress" -> {
                 if (trip.dropoffLat != 0.0) {
                     val midLat = (loc.lat + trip.dropoffLat) / 2
@@ -151,7 +152,7 @@ fun ActiveTripScreen(
 
     Box(modifier = Modifier.fillMaxSize()) {
 
-        // ── Full-screen OSMDroid map ──────────────────────────────────────────
+        // ── Full-screen map ───────────────────────────────────────────────────
         AndroidView(
             factory = { ctx ->
                 MapView(ctx).apply {
@@ -165,7 +166,7 @@ fun ActiveTripScreen(
             modifier = Modifier.fillMaxSize(),
         )
 
-        // ── Recenter FAB — above the sheet ────────────────────────────────────
+        // ── Recenter FAB ──────────────────────────────────────────────────────
         if (driverLocation != null) {
             FloatingActionButton(
                 onClick = {
@@ -248,7 +249,6 @@ fun ActiveTripScreen(
                         Spacer(Modifier.height(8.dp))
 
                         // ── Status message card ───────────────────────────────
-                        // Fix 2: show a contextual message based on current status
                         when (trip.status) {
                             "agreed" -> Card(
                                 modifier  = Modifier.fillMaxWidth(),
@@ -277,6 +277,37 @@ fun ActiveTripScreen(
                                     )
                                 }
                             }
+
+                            // ── arrived: driver is at pickup ──────────────────
+                            "arrived" -> Card(
+                                modifier  = Modifier.fillMaxWidth(),
+                                shape     = RoundedCornerShape(10.dp),
+                                colors    = CardDefaults.cardColors(
+                                    containerColor = AmberLight
+                                ),
+                                elevation = CardDefaults.cardElevation(0.dp),
+                            ) {
+                                Row(
+                                    modifier  = Modifier.padding(12.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                                ) {
+                                    Icon(
+                                        Icons.Default.DirectionsCar,
+                                        contentDescription = null,
+                                        tint     = Amber,
+                                        modifier = Modifier.size(18.dp),
+                                    )
+                                    Text(
+                                        "Driver sudah tiba! Segera menuju kendaraan",
+                                        style = MaterialTheme.typography.bodySmall.copy(
+                                            color      = Amber,
+                                            fontWeight = FontWeight.Bold,
+                                        ),
+                                    )
+                                }
+                            }
+
                             "in_progress" -> Card(
                                 modifier  = Modifier.fillMaxWidth(),
                                 shape     = RoundedCornerShape(10.dp),
@@ -482,10 +513,10 @@ fun ActiveTripScreen(
 // ── Map overlays ──────────────────────────────────────────────────────────────
 
 private fun updateOverlays(
-    map:          MapView,
-    trip:         TripResponse?,
-    driverLoc:    DriverLocation?,
-    routePoints:  List<GeoPoint>,
+    map:         MapView,
+    trip:        TripResponse?,
+    driverLoc:   DriverLocation?,
+    routePoints: List<GeoPoint>,
 ) {
     map.overlays.removeAll { it is Marker || it is Polyline }
 
@@ -493,7 +524,7 @@ private fun updateOverlays(
 
     val status = trip.status
 
-    // ── Route line ────────────────────────────────────────────────────────────
+    // Route line
     if (routePoints.isNotEmpty()) {
         val lineColor = if (status == "in_progress")
             android.graphics.Color.parseColor("#E53935")
@@ -512,7 +543,7 @@ private fun updateOverlays(
         }
     }
 
-    // ── Pickup pin — always visible ───────────────────────────────────────────
+    // Pickup pin — always visible
     if (trip.pickupLat != 0.0) {
         Marker(map).apply {
             id       = "pickup"
@@ -525,7 +556,7 @@ private fun updateOverlays(
         }
     }
 
-    // ── Dropoff pin — transport + in_progress only ────────────────────────────
+    // Dropoff pin — transport + in_progress only
     if (status == "in_progress" &&
         trip.tripType == "transport" &&
         trip.dropoffLat != 0.0) {
@@ -540,20 +571,20 @@ private fun updateOverlays(
         }
     }
 
-    // ── Driver / vehicle pin ──────────────────────────────────────────────────
-    // Fix 5: when in_progress rider is inside the vehicle — show combined marker
+    // Driver/vehicle pin
+    // When in_progress rider is inside the vehicle — show combined green marker
+    // When arrived — show amber marker to indicate driver is waiting at pickup
     driverLoc?.let { loc ->
+        val (pinColor, pinTitle) = when (status) {
+            "arrived"     -> Pair(0xFFF57F17.toInt(), "Driver menunggu Anda")
+            "in_progress" -> Pair(0xFF2E7D32.toInt(), "Kendaraan Anda")
+            else          -> Pair(0xFF03A9F4.toInt(), trip.driverName.ifEmpty { "Driver" })
+        }
         Marker(map).apply {
             id       = "driver"
             position = GeoPoint(loc.lat, loc.lng)
-            // When in_progress both rider and driver are in the same vehicle
-            title    = if (status == "in_progress") "Kendaraan Anda" else trip.driverName.ifEmpty { "Driver" }
-            icon     = circleDrawable(
-                map.context,
-                if (status == "in_progress") 0xFF2E7D32.toInt()  // green = vehicle carrying rider
-                else 0xFF03A9F4.toInt(),                           // blue = driver heading to pickup
-                32,
-            )
+            title    = pinTitle
+            icon     = circleDrawable(map.context, pinColor, 32)
             setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_CENTER)
             map.overlays.add(this)
         }
@@ -561,8 +592,6 @@ private fun updateOverlays(
 
     map.invalidate()
 }
-
-// ── Drawing helpers ───────────────────────────────────────────────────────────
 
 private fun circleDrawable(
     context:  android.content.Context,
@@ -589,13 +618,14 @@ private fun circleDrawable(
 private fun StatusStepper(status: String) {
     val steps = listOf(
         Triple("agreed",      "Driver ditemukan",  Icons.Default.Check),
+        Triple("arrived",     "Driver tiba",       Icons.Default.DirectionsCar),
         Triple("in_progress", "Dalam perjalanan",  Icons.Default.DirectionsCar),
         Triple("completed",   "Sampai tujuan",     Icons.Default.LocationOn),
     )
     val currentIndex = steps.indexOfFirst { it.first == status }.coerceAtLeast(0)
 
     Row(
-        modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 4.dp),
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 2.dp, vertical = 4.dp),
         horizontalArrangement = Arrangement.SpaceEvenly,
         verticalAlignment     = Alignment.CenterVertically,
     ) {
@@ -608,39 +638,47 @@ private fun StatusStepper(status: String) {
             ) {
                 Surface(
                     shape    = CircleShape,
-                    color    = if (isDone) PrimaryBlue else Color(0xFFEEEEEE),
-                    modifier = Modifier.size(if (isActive) 40.dp else 32.dp),
+                    color    = when {
+                        isActive && status == "arrived" -> Color(0xFFF57F17) // amber for arrived
+                        isDone                          -> PrimaryBlue
+                        else                            -> Color(0xFFEEEEEE)
+                    },
+                    modifier = Modifier.size(if (isActive) 36.dp else 28.dp),
                 ) {
                     Box(contentAlignment = Alignment.Center, modifier = Modifier.fillMaxSize()) {
                         if (isActive && status != "completed") {
                             CircularProgressIndicator(
                                 color       = Color.White,
-                                modifier    = Modifier.size(18.dp),
+                                modifier    = Modifier.size(16.dp),
                                 strokeWidth = 2.dp,
                             )
                         } else {
                             Icon(
                                 icon, null,
                                 tint     = if (isDone) Color.White else Color(0xFFBBBBBB),
-                                modifier = Modifier.size(16.dp),
+                                modifier = Modifier.size(14.dp),
                             )
                         }
                     }
                 }
-                Spacer(Modifier.height(4.dp))
+                Spacer(Modifier.height(3.dp))
                 Text(
                     label,
                     style = MaterialTheme.typography.labelSmall.copy(
-                        color      = if (isDone) PrimaryBlue else Color(0xFFAAAAAA),
+                        color = when {
+                            isActive && status == "arrived" -> Color(0xFFF57F17)
+                            isDone                          -> PrimaryBlue
+                            else                            -> Color(0xFFAAAAAA)
+                        },
                         fontWeight = if (isActive) FontWeight.Bold else FontWeight.Normal,
                     ),
-                    modifier = Modifier.padding(horizontal = 2.dp),
+                    textAlign = androidx.compose.ui.text.style.TextAlign.Center,
                 )
             }
             if (index < steps.lastIndex) {
                 Box(
                     modifier = Modifier
-                        .weight(0.3f).height(2.dp)
+                        .weight(0.2f).height(2.dp)
                         .clip(RoundedCornerShape(1.dp))
                         .background(
                             if (index < currentIndex) PrimaryBlue else Color(0xFFEEEEEE)

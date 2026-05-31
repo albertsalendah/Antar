@@ -22,6 +22,7 @@
 | 017_fix_rider_profiles_columns | updated_at on rider_profiles, NOT NULL constraints |
 | 018+ | Various RLS fixes, driver_profiles last_lat/last_lng columns added |
 | fix_rls_islands_and_notification_queue | RLS enabled on islands and driver_notification_queue |
+| add_arrived_trip_status | Added `arrived` value to trip_status enum |
 
 ---
 
@@ -84,7 +85,7 @@
 | Home | OSMDroid full-screen map, vehicle type chips with online count, trip type toggle, pickup/dropoff pin-tap via PickerMode, 2-step bottom sheet (form → summary), nearby driver polling every 5s, active trip recovery on load, pickup geocode fallback when coords are zero |
 | Searching | Radar animation (3 staggered rings), Realtime + 5s polling fallback, cancel with confirm dialog |
 | Negotiation | Fare display, round counter, counter input field, accept/counter/reject, Realtime + 5s polling, counter exhausted message |
-| ActiveTrip | Full-screen OSMDroid map, draggable bottom sheet, driver pin polling every 3s, OSRM road route fixed (triggers on trip load + location), status message card (on-the-way/in-vehicle), combined green marker when in_progress, pickup/dropoff pins, status stepper, call button |
+| ActiveTrip | Full-screen OSMDroid map, draggable bottom sheet, driver pin polling every 3s, OSRM road route fixed (triggers on trip load + location), **4-step status stepper** (agreed→arrived→in_progress→completed), status message cards (on-the-way / driver-arrived amber / in-vehicle green), amber marker when arrived, combined green marker when in_progress, pickup/dropoff pins, call button |
 | TripComplete | Trip summary card, fare display, rate prompt |
 | RateDriver | 5-star selector, optional comment, haptic on tap |
 | TripHistory | Paginated (20/page), shimmer skeleton, pull-to-refresh, infinite scroll, rate button |
@@ -116,7 +117,7 @@
 | OfferPrice | Fare stepper (+/- 1000 IDR), floor price enforcement, trip summary card |
 | WaitingForRider | Realtime subscription (timestamp-suffixed channel name), spinning clock animation, shows offered fare |
 | CounterDecision | Accept/Counter/Reject rider's counter, fare stepper, driver counter limit display, floor enforcement |
-| ActiveTrip | Full-screen OSMDroid map, draggable bottom sheet, driver position pin, OSRM road route (>50m re-fetch threshold, resets on startTrip), pickup/dropoff pins, status stepper, rider info + call button, fare card, address card, complete button only enabled within 150m of dropoff |
+| ActiveTrip | Full-screen OSMDroid map, draggable bottom sheet, driver position pin, OSRM road route (>50m re-fetch threshold, resets on startTrip), pickup/dropoff pins, **4-step status stepper** (agreed→arrived→in_progress→completed), rider info + call button, fare card, address card, complete button only enabled within 150m of dropoff |
 | RateRider | 5-star tap selector, optional comment, skip option |
 | TripHistory | Paginated, skeleton, infinite scroll, rate button for unrated completed trips |
 
@@ -144,6 +145,7 @@
 | TODO-1 | Pickup/dropoff coords already present in rider server + Android code — was already done before tracking |
 | TODO-2 | Driver `UpdateLocation` SQL now writes `last_lat` and `last_lng` alongside PostGIS `last_location` |
 | TODO-3 | Driver `ActiveTripScreen` rewritten with full-screen map + draggable bottom sheet + OSRM routing via new `RouteHelper.kt` |
+| TODO-5 | Added `arrived` trip status (DB migration + server endpoint `ArriveAtPickup` + FCM to rider + both app screens updated with 4-step stepper and arrived UI state) |
 
 ---
 
