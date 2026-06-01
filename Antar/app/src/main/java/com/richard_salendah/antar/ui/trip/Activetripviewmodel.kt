@@ -32,12 +32,10 @@ class ActiveTripViewModel(app: Application) : AndroidViewModel(app) {
     var loading by mutableStateOf(false)
     var error   by mutableStateOf<String?>(null)
 
-    // ── Location tracker (Option A active, Option B ready) ────────────────────
-    // To migrate to Option B: replace PollingLocationTracker with
-    // RealtimeLocationTracker once the stub in LocationTracker.kt is implemented.
+    // ── Location tracker ──────────────────────────────────────────────────────
     private val locationTracker: LocationTracker = PollingLocationTracker(
-        api         = api,
-        intervalMs  = 3_000L,
+        api        = api,
+        intervalMs = 3_000L,
     )
     val driverLocation: StateFlow<DriverLocation?> = locationTracker.location
 
@@ -45,7 +43,6 @@ class ActiveTripViewModel(app: Application) : AndroidViewModel(app) {
     var routePoints by mutableStateOf<List<GeoPoint>>(emptyList())
         private set
 
-    // Track where we last fetched a route from so we can apply the 50m threshold
     private var lastRouteFetchLat = 0.0
     private var lastRouteFetchLng = 0.0
 
@@ -64,6 +61,8 @@ class ActiveTripViewModel(app: Application) : AndroidViewModel(app) {
         observeLocationForRouting()
     }
 
+    // ── Trip loading ──────────────────────────────────────────────────────────
+
     private fun loadTrip(tripId: String) {
         viewModelScope.launch {
             loading = true
@@ -71,15 +70,14 @@ class ActiveTripViewModel(app: Application) : AndroidViewModel(app) {
                 val resp = api.getTrip(tripId)
                 if (resp.isSuccessful) {
                     trip = resp.body()?.data
-                    // Trigger an initial route fetch once we know the trip coords
-                    val t = trip ?: return@runCatching
-                    val driverLoc = driverLocation.value
-                    if (driverLoc != null) {
-                        fetchRouteIfNeeded(driverLoc.lat, driverLoc.lng, t)
-                    }
-                    trip?.let { t -> driverLocation.value?.let { loc ->
+                    // Trigger route fetch immediately once trip is loaded.
+                    // driverLocation may already have a value from the first poll
+                    // that completed before this coroutine finished.
+                    val t   = trip ?: return@runCatching
+                    val loc = driverLocation.value
+                    if (loc != null) {
                         fetchRouteIfNeeded(loc.lat, loc.lng, t)
-                    }}
+                    }
                 } else {
                     error = "Gagal memuat detail perjalanan"
                 }
@@ -93,7 +91,7 @@ class ActiveTripViewModel(app: Application) : AndroidViewModel(app) {
     /**
      * Observes driver location changes and re-fetches the OSRM route when the
      * driver has moved more than 50 metres from the last fetch point.
-     * This keeps the route line accurate without hammering OSRM on every 3s poll.
+     * Also fires on the first non-null location regardless of distance.
      */
     private fun observeLocationForRouting() {
         viewModelScope.launch {
@@ -114,19 +112,19 @@ class ActiveTripViewModel(app: Application) : AndroidViewModel(app) {
             driverLat, driverLng,
             lastRouteFetchLat, lastRouteFetchLng,
         )
-        // Only re-fetch when driver has moved >50 m or we have no route yet
         if (moved < 50.0 && routePoints.isNotEmpty()) return
 
         val (destLat, destLng) = when (t.status) {
-            "agreed"      -> Pair(t.pickupLat, t.pickupLng)
-            "in_progress" -> if (t.dropoffLat != 0.0)
+            "agreed", "arrived" -> Pair(t.pickupLat, t.pickupLng)
+            "in_progress"       -> if (t.dropoffLat != 0.0)
                 Pair(t.dropoffLat, t.dropoffLng)
             else
                 Pair(t.pickupLat, t.pickupLng)
-            else          -> return
+            else -> return
         }
 
         if (destLat == 0.0 && destLng == 0.0) return
+        if (driverLat == 0.0 && driverLng == 0.0) return
 
         lastRouteFetchLat = driverLat
         lastRouteFetchLng = driverLng
@@ -137,29 +135,34 @@ class ActiveTripViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    // ── Status realtime ───────────────────────────────────────────────────────
+    // ── Status Realtime ───────────────────────────────────────────────────────
 
     private fun subscribeRealtime(tripId: String, onCompleted: () -> Unit) {
         viewModelScope.launch {
             runCatching {
-                val ch = supabase.channel("active_trip_$tripId")
+                val ch = supabase.channel("active_trip_$tripId-${System.currentTimeMillis()}")
                 channel = ch
                 ch.postgresChangeFlow<PostgresAction.Update>(schema = "public") {
                     table = "trips"
                     filter("id", FilterOperator.EQ, tripId)
                 }.onEach { action ->
-                    val status = action.record["status"]?.jsonPrimitive?.content
-                    val resp   = api.getTrip(tripId)
+                    val resp = api.getTrip(tripId)
                     if (resp.isSuccessful) {
                         val t = resp.body()?.data ?: return@onEach
                         trip = t
                         // Re-evaluate route destination when status changes
                         driverLocation.value?.let { loc ->
+                            // Reset route so it refetches toward new destination
+                            if (t.status == "in_progress") {
+                                lastRouteFetchLat = 0.0
+                                lastRouteFetchLng = 0.0
+                            }
                             fetchRouteIfNeeded(loc.lat, loc.lng, t)
                         }
                         if (t.status == "completed") { teardown(); onCompleted() }
-                    } else if (status == "completed") {
-                        teardown(); onCompleted()
+                    } else {
+                        val status = action.record["status"]?.jsonPrimitive?.content
+                        if (status == "completed") { teardown(); onCompleted() }
                     }
                 }.launchIn(viewModelScope)
                 ch.subscribe()

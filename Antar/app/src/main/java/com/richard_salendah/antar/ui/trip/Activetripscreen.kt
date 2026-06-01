@@ -6,7 +6,6 @@ import android.graphics.Canvas
 import android.graphics.Paint
 import android.net.Uri
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -99,6 +98,7 @@ fun ActiveTripScreen(
     val maxSheetHeight: Dp = screenHeightDp * 0.75f
     val minSheetHeight: Dp = 195.dp
 
+    // mapView is remembered state so LaunchedEffect can use it as a key
     var mapView        by remember { mutableStateOf<MapView?>(null) }
     var sheetExpansion by remember { mutableFloatStateOf(0f) }
     var dragAccum      by remember { mutableFloatStateOf(0f) }
@@ -131,8 +131,10 @@ fun ActiveTripScreen(
         }
     }
 
-    // Refresh map overlays
-    LaunchedEffect(driverLocation, trip, routePoints) {
+    // ── Overlay update ────────────────────────────────────────────────────────
+    // mapView is included as a key so this re-runs when AndroidView finishes
+    // initialising — which is what was causing the route line to never appear.
+    LaunchedEffect(mapView, driverLocation, trip, routePoints) {
         val map = mapView ?: return@LaunchedEffect
         updateOverlays(map, trip, driverLocation, routePoints)
     }
@@ -243,19 +245,17 @@ fun ActiveTripScreen(
                             .navigationBarsPadding()
                             .padding(horizontal = 16.dp, vertical = 8.dp),
                     ) {
-                        // ── Status stepper ────────────────────────────────────
                         StatusStepper(status = trip.status)
 
                         Spacer(Modifier.height(8.dp))
 
-                        // ── Status message card ───────────────────────────────
+                        // Status message card
                         when (trip.status) {
                             "agreed" -> Card(
                                 modifier  = Modifier.fillMaxWidth(),
                                 shape     = RoundedCornerShape(10.dp),
                                 colors    = CardDefaults.cardColors(
-                                    containerColor = Color(0xFFE8F4FD)
-                                ),
+                                    containerColor = Color(0xFFE8F4FD)),
                                 elevation = CardDefaults.cardElevation(0.dp),
                             ) {
                                 Row(
@@ -271,20 +271,15 @@ fun ActiveTripScreen(
                                     Text(
                                         "Driver sedang menuju lokasi penjemputan Anda",
                                         style = MaterialTheme.typography.bodySmall.copy(
-                                            color      = PrimaryBlue,
-                                            fontWeight = FontWeight.Medium,
-                                        ),
+                                            color = PrimaryBlue, fontWeight = FontWeight.Medium),
                                     )
                                 }
                             }
-
-                            // ── arrived: driver is at pickup ──────────────────
                             "arrived" -> Card(
                                 modifier  = Modifier.fillMaxWidth(),
                                 shape     = RoundedCornerShape(10.dp),
                                 colors    = CardDefaults.cardColors(
-                                    containerColor = AmberLight
-                                ),
+                                    containerColor = AmberLight),
                                 elevation = CardDefaults.cardElevation(0.dp),
                             ) {
                                 Row(
@@ -293,27 +288,22 @@ fun ActiveTripScreen(
                                     horizontalArrangement = Arrangement.spacedBy(10.dp),
                                 ) {
                                     Icon(
-                                        Icons.Default.DirectionsCar,
-                                        contentDescription = null,
+                                        Icons.Default.DirectionsCar, null,
                                         tint     = Amber,
                                         modifier = Modifier.size(18.dp),
                                     )
                                     Text(
                                         "Driver sudah tiba! Segera menuju kendaraan",
                                         style = MaterialTheme.typography.bodySmall.copy(
-                                            color      = Amber,
-                                            fontWeight = FontWeight.Bold,
-                                        ),
+                                            color = Amber, fontWeight = FontWeight.Bold),
                                     )
                                 }
                             }
-
                             "in_progress" -> Card(
                                 modifier  = Modifier.fillMaxWidth(),
                                 shape     = RoundedCornerShape(10.dp),
                                 colors    = CardDefaults.cardColors(
-                                    containerColor = GreenLight
-                                ),
+                                    containerColor = GreenLight),
                                 elevation = CardDefaults.cardElevation(0.dp),
                             ) {
                                 Row(
@@ -322,17 +312,14 @@ fun ActiveTripScreen(
                                     horizontalArrangement = Arrangement.spacedBy(10.dp),
                                 ) {
                                     Icon(
-                                        Icons.Default.DirectionsCar,
-                                        contentDescription = null,
+                                        Icons.Default.DirectionsCar, null,
                                         tint     = Green,
                                         modifier = Modifier.size(18.dp),
                                     )
                                     Text(
                                         "Perjalanan berlangsung — Anda di dalam kendaraan",
                                         style = MaterialTheme.typography.bodySmall.copy(
-                                            color      = Green,
-                                            fontWeight = FontWeight.Medium,
-                                        ),
+                                            color = Green, fontWeight = FontWeight.Medium),
                                     )
                                 }
                             }
@@ -340,14 +327,13 @@ fun ActiveTripScreen(
 
                         Spacer(Modifier.height(8.dp))
 
-                        // ── Expanded: fare + route detail ─────────────────────
+                        // Expanded: fare + detail
                         if (sheetExpansion > 0.1f) {
                             Card(
                                 modifier  = Modifier.fillMaxWidth(),
                                 shape     = RoundedCornerShape(12.dp),
                                 colors    = CardDefaults.cardColors(
-                                    containerColor = Color(0xFFF8F8F8)
-                                ),
+                                    containerColor = Color(0xFFF8F8F8)),
                                 elevation = CardDefaults.cardElevation(0.dp),
                             ) {
                                 Row(
@@ -389,8 +375,7 @@ fun ActiveTripScreen(
                                 modifier  = Modifier.fillMaxWidth(),
                                 shape     = RoundedCornerShape(12.dp),
                                 colors    = CardDefaults.cardColors(
-                                    containerColor = Color(0xFFF8F8F8)
-                                ),
+                                    containerColor = Color(0xFFF8F8F8)),
                                 elevation = CardDefaults.cardElevation(0.dp),
                             ) {
                                 Column(modifier = Modifier.padding(14.dp)) {
@@ -431,7 +416,7 @@ fun ActiveTripScreen(
                             Spacer(Modifier.height(8.dp))
                         }
 
-                        // ── Always visible: driver bar ────────────────────────
+                        // Driver info bar
                         Surface(
                             modifier        = Modifier.fillMaxWidth(),
                             shape           = RoundedCornerShape(12.dp),
@@ -524,7 +509,7 @@ private fun updateOverlays(
 
     val status = trip.status
 
-    // Route line
+    // ── Route line ────────────────────────────────────────────────────────────
     if (routePoints.isNotEmpty()) {
         val lineColor = if (status == "in_progress")
             android.graphics.Color.parseColor("#E53935")
@@ -543,8 +528,10 @@ private fun updateOverlays(
         }
     }
 
-    // Pickup pin — always visible
-    if (trip.pickupLat != 0.0) {
+    // ── Pickup pin ────────────────────────────────────────────────────────────
+    // Hidden when in_progress — rider is already in the vehicle so the
+    // pickup location is no longer relevant on the map.
+    if (trip.pickupLat != 0.0 && status != "in_progress") {
         Marker(map).apply {
             id       = "pickup"
             position = GeoPoint(trip.pickupLat, trip.pickupLng)
@@ -556,7 +543,7 @@ private fun updateOverlays(
         }
     }
 
-    // Dropoff pin — transport + in_progress only
+    // ── Dropoff pin — transport + in_progress only ────────────────────────────
     if (status == "in_progress" &&
         trip.tripType == "transport" &&
         trip.dropoffLat != 0.0) {
@@ -571,9 +558,7 @@ private fun updateOverlays(
         }
     }
 
-    // Driver/vehicle pin
-    // When in_progress rider is inside the vehicle — show combined green marker
-    // When arrived — show amber marker to indicate driver is waiting at pickup
+    // ── Driver / vehicle pin ──────────────────────────────────────────────────
     driverLoc?.let { loc ->
         val (pinColor, pinTitle) = when (status) {
             "arrived"     -> Pair(0xFFF57F17.toInt(), "Driver menunggu Anda")
@@ -639,7 +624,7 @@ private fun StatusStepper(status: String) {
                 Surface(
                     shape    = CircleShape,
                     color    = when {
-                        isActive && status == "arrived" -> Color(0xFFF57F17) // amber for arrived
+                        isActive && status == "arrived" -> Amber
                         isDone                          -> PrimaryBlue
                         else                            -> Color(0xFFEEEEEE)
                     },
@@ -666,7 +651,7 @@ private fun StatusStepper(status: String) {
                     label,
                     style = MaterialTheme.typography.labelSmall.copy(
                         color = when {
-                            isActive && status == "arrived" -> Color(0xFFF57F17)
+                            isActive && status == "arrived" -> Amber
                             isDone                          -> PrimaryBlue
                             else                            -> Color(0xFFAAAAAA)
                         },
@@ -688,8 +673,6 @@ private fun StatusStepper(status: String) {
         }
     }
 }
-
-// ── Detail row ────────────────────────────────────────────────────────────────
 
 @Composable
 private fun DetailRow(

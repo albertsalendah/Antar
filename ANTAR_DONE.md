@@ -161,6 +161,8 @@
 | 5 | Only driver marker moves when in_progress; rider marker stays at pickup | When `in_progress`, suppress separate rider marker. Show single green combined marker at driver position titled "Kendaraan Anda" indicating rider is inside the vehicle |
 | A | Rider negotiation counter button still visible when rounds exhausted | Added `counterExhausted` state to `NegotiationViewModel`; hides button and shows message when server returns exhausted error |
 | B | HomeScreen validate() passes when pickup address typed but coords are zero | Added pickup geocode fallback in `requestRide()` — geocodes pickup address if coords are still 0.0, returns error to user if geocoding fails |
+| C | Rider ActiveTrip route line never shows (second root cause) | `LaunchedEffect` for map overlays was missing `mapView` as a key — the effect ran before `AndroidView` finished initialising. Added `mapView` as a key so overlays redraw when map is ready |
+| D | Pickup pin visible on both apps when rider is in the vehicle | Pickup pin now hidden when `status == "in_progress"` on both driver and rider `ActiveTripScreen` |
 
 ---
 

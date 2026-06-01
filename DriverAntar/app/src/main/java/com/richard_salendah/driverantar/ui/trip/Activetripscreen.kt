@@ -646,7 +646,8 @@ private fun updateOverlays(
     }
 
     trip?.let { t ->
-        if (t.pickup_lat != 0.0) {
+        // Pickup pin — hidden when in_progress (rider is already in the vehicle)
+        if (t.pickup_lat != 0.0 && t.status != "in_progress") {
             Marker(map).apply {
                 position = GeoPoint(t.pickup_lat, t.pickup_lng)
                 title    = "Jemput: ${t.rider_name}"
