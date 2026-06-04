@@ -16,7 +16,9 @@ import io.github.jan.supabase.realtime.postgresChangeFlow
 import io.github.jan.supabase.realtime.realtime
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.launchIn
 import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.launch
@@ -32,12 +34,10 @@ class ActiveTripViewModel(app: Application) : AndroidViewModel(app) {
     var loading by mutableStateOf(false)
     var error   by mutableStateOf<String?>(null)
 
-    // ── Location tracker ──────────────────────────────────────────────────────
-    private val locationTracker: LocationTracker = PollingLocationTracker(
-        api        = api,
-        intervalMs = 3_000L,
-    )
-    val driverLocation: StateFlow<DriverLocation?> = locationTracker.location
+    // ── Location tracker — created lazily after trip loads (needs driverId) ──
+    private var locationTracker: LocationTracker? = null
+    private val _driverLocation = MutableStateFlow<DriverLocation?>(null)
+    val driverLocation: StateFlow<DriverLocation?> = _driverLocation.asStateFlow()
 
     // ── Route state ───────────────────────────────────────────────────────────
     var routePoints by mutableStateOf<List<GeoPoint>>(emptyList())
@@ -47,18 +47,17 @@ class ActiveTripViewModel(app: Application) : AndroidViewModel(app) {
     private var lastRouteFetchLng = 0.0
 
     // ── Status tracking ───────────────────────────────────────────────────────
-    private var channel:    RealtimeChannel? = null
-    private var statusPoll: Job?             = null
-    private var started                      = false
+    private var statusChannel: RealtimeChannel? = null
+    private var statusPoll:    Job?             = null
+    private var started                         = false
 
     fun start(tripId: String, onCompleted: () -> Unit) {
         if (started) return
         started = true
-        loadTrip(tripId)
-        locationTracker.start(tripId, viewModelScope)
+        loadTrip(tripId)                         // creates tracker after trip loads
         subscribeRealtime(tripId, onCompleted)
         startStatusPolling(tripId, onCompleted)
-        observeLocationForRouting()
+        observeLocationForRouting()              // collect from _driverLocation whenever it emits
     }
 
     // ── Trip loading ──────────────────────────────────────────────────────────
@@ -69,15 +68,37 @@ class ActiveTripViewModel(app: Application) : AndroidViewModel(app) {
             runCatching {
                 val resp = api.getTrip(tripId)
                 if (resp.isSuccessful) {
-                    trip = resp.body()?.data
-                    // Trigger route fetch immediately once trip is loaded.
-                    // driverLocation may already have a value from the first poll
-                    // that completed before this coroutine finished.
-                    val t   = trip ?: return@runCatching
-                    val loc = driverLocation.value
-                    if (loc != null) {
-                        fetchRouteIfNeeded(loc.lat, loc.lng, t)
+                    val t = resp.body()?.data ?: run {
+                        error = "Gagal memuat detail perjalanan"
+                        return@runCatching
                     }
+                    trip = t
+
+                    // Create and start location tracker now that we know the driver ID.
+                    // RealtimeLocationTracker uses Supabase Realtime as primary and
+                    // PollingLocationTracker (15s) as fallback.
+                    if (locationTracker == null) {
+                        val driverProfileId = t.driverId.orEmpty()
+                        val tracker = RealtimeLocationTracker(
+                            api             = api,
+                            supabase        = supabase,
+                            driverProfileId = driverProfileId,
+                        )
+                        locationTracker = tracker
+                        tracker.start(tripId, viewModelScope)
+
+                        // Bridge tracker emissions into our shared StateFlow
+                        viewModelScope.launch {
+                            tracker.location.collect { loc ->
+                                _driverLocation.value = loc
+                            }
+                        }
+                    }
+
+                    // Trigger route fetch immediately if location already arrived
+                    val loc = _driverLocation.value
+                    if (loc != null) fetchRouteIfNeeded(loc.lat, loc.lng, t)
+
                 } else {
                     error = "Gagal memuat detail perjalanan"
                 }
@@ -91,11 +112,10 @@ class ActiveTripViewModel(app: Application) : AndroidViewModel(app) {
     /**
      * Observes driver location changes and re-fetches the OSRM route when the
      * driver has moved more than 50 metres from the last fetch point.
-     * Also fires on the first non-null location regardless of distance.
      */
     private fun observeLocationForRouting() {
         viewModelScope.launch {
-            driverLocation.collect { loc ->
+            _driverLocation.collect { loc ->
                 loc ?: return@collect
                 val t = trip ?: return@collect
                 fetchRouteIfNeeded(loc.lat, loc.lng, t)
@@ -135,13 +155,13 @@ class ActiveTripViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    // ── Status Realtime ───────────────────────────────────────────────────────
+    // ── Trip status Realtime ──────────────────────────────────────────────────
 
     private fun subscribeRealtime(tripId: String, onCompleted: () -> Unit) {
         viewModelScope.launch {
             runCatching {
                 val ch = supabase.channel("active_trip_$tripId-${System.currentTimeMillis()}")
-                channel = ch
+                statusChannel = ch
                 ch.postgresChangeFlow<PostgresAction.Update>(schema = "public") {
                     table = "trips"
                     filter("id", FilterOperator.EQ, tripId)
@@ -150,13 +170,12 @@ class ActiveTripViewModel(app: Application) : AndroidViewModel(app) {
                     if (resp.isSuccessful) {
                         val t = resp.body()?.data ?: return@onEach
                         trip = t
-                        // Re-evaluate route destination when status changes
-                        driverLocation.value?.let { loc ->
-                            // Reset route so it refetches toward new destination
-                            if (t.status == "in_progress") {
-                                lastRouteFetchLat = 0.0
-                                lastRouteFetchLng = 0.0
-                            }
+                        // Reset route destination when status transitions to in_progress
+                        if (t.status == "in_progress") {
+                            lastRouteFetchLat = 0.0
+                            lastRouteFetchLng = 0.0
+                        }
+                        _driverLocation.value?.let { loc ->
                             fetchRouteIfNeeded(loc.lat, loc.lng, t)
                         }
                         if (t.status == "completed") { teardown(); onCompleted() }
@@ -186,11 +205,16 @@ class ActiveTripViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    // ── Teardown ──────────────────────────────────────────────────────────────
+
     private fun teardown() {
-        locationTracker.stop()
+        locationTracker?.stop()
+        locationTracker = null
         statusPoll?.cancel()
         viewModelScope.launch {
-            runCatching { channel?.let { supabase.realtime.removeChannel(it) } }
+            runCatching {
+                statusChannel?.let { supabase.realtime.removeChannel(it) }
+            }
         }
     }
 
