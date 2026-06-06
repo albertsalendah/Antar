@@ -8,9 +8,12 @@ import (
 )
 
 func RegisterRoutes(rg *gin.RouterGroup, h *Handler, cfg *config.Config) {
+	loginLimiter := middleware.NewLoginRateLimiter()
+	offerLimiter := middleware.NewOfferRateLimiter()
+
 	// Public
 	rg.POST("/register", h.Register)
-	rg.POST("/login", h.Login)
+	rg.POST("/login", loginLimiter, h.Login)
 	rg.POST("/refresh", h.RefreshToken)
 
 	// Protected
@@ -47,7 +50,7 @@ func RegisterRoutes(rg *gin.RouterGroup, h *Handler, cfg *config.Config) {
 		auth.GET("/trips/active", h.GetActiveTrip)
 		auth.GET("/trips/incoming", h.IncomingTrips)
 		auth.GET("/trips", h.ListTrips)
-		auth.POST("/trips/:trip_id/offer", h.OfferPrice)
+		auth.POST("/trips/:trip_id/offer", offerLimiter, h.OfferPrice)
 		auth.POST("/trips/:trip_id/counter", h.CounterOffer)
 		auth.POST("/trips/:trip_id/start", h.StartTrip)
 		auth.POST("/trips/:trip_id/arrive", h.ArriveAtPickup)
