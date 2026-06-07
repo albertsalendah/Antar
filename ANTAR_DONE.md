@@ -1,5 +1,5 @@
 # Antar — Completed Work Log
-**Last updated:** May 2026
+**Last updated:** June 2026
 **Do NOT paste this in new AI sessions unless debugging a regression.**
 **Reference only — tracks what has been built and fixed.**
 
@@ -23,6 +23,9 @@
 | 018+ | Various RLS fixes, driver_profiles last_lat/last_lng columns added |
 | fix_rls_islands_and_notification_queue | RLS enabled on islands and driver_notification_queue |
 | add_arrived_trip_status | Added `arrived` value to trip_status enum |
+| rider_read_driver_profiles_realtime | driver_profiles added to Realtime publication; RLS SELECT policy for authenticated riders |
+| security_rls_hardening | SEC-1 to SEC-4: service_role scoping, driver_profiles/rider_profiles OR EXISTS removed, trips driver-select scoped by island+vehicle+online, ratings scoped to rater/ratee |
+| expire_stale_offered_trips | NEG-TIMEOUT: process_trip_notification_timeouts() now resets offered trips back to requested after 10 min inactivity |
 
 ---
 
@@ -74,6 +77,10 @@
 - Dockerfile (multi-stage, Alpine)
 - Graceful shutdown via signal context
 
+### Security — Server (SEC-7, SEC-8)
+- **SEC-7**: `IncomingTrips` and `NearbyDrivers` now use positional `$N` parameters — no more `fmt.Sprintf` interpolation of `vehicle_type_id`
+- **SEC-8**: Rate limiting applied via `ulule/limiter/v3` — `POST /login` (5/min per IP) on both driver and rider routes; `POST /trips/:id/offer` and `POST /request-ride` (10/min per IP)
+
 ---
 
 ## Rider Android App — Completed Screens
@@ -100,6 +107,7 @@
 - Haptic feedback: Tick / Confirm / Error patterns
 - Shimmer loading: TripCardSkeleton, ProfileSkeleton
 - Theme: full Material3 light color scheme with Antar brand colors
+- `RealtimeLocationTracker`: Supabase Realtime primary + 15s polling fallback for driver location in ActiveTrip
 
 ---
 
@@ -145,8 +153,25 @@
 | TODO-1 | Pickup/dropoff coords already present in rider server + Android code — was already done before tracking |
 | TODO-2 | Driver `UpdateLocation` SQL now writes `last_lat` and `last_lng` alongside PostGIS `last_location` |
 | TODO-3 | Driver `ActiveTripScreen` rewritten with full-screen map + draggable bottom sheet + OSRM routing via new `RouteHelper.kt` |
+| TODO-4A | Supabase migration `rider_read_driver_profiles_realtime` applied; `driver_profiles` in Realtime publication; RLS SELECT policy for authenticated riders |
+| TODO-4B | `LocationTracker.kt` rewritten with `RealtimeLocationTracker` (Realtime primary, 15s polling fallback) |
+| TODO-4C | Rider `ActiveTripViewModel` updated: tracker created lazily after trip loads, `_driverLocation` MutableStateFlow exposed |
 | TODO-5 | Added `arrived` trip status (DB migration + server endpoint `ArriveAtPickup` + FCM to rider + both app screens updated with 4-step stepper and arrived UI state) |
 | TODO-6 | Rider negotiation screen — replaced plain text input with +/- stepper (1000 IDR steps), matching driver app's CounterDecisionScreen UX |
+
+---
+
+## Security — Completed (DB + Server)
+
+| ID | What was done |
+|---|---|
+| SEC-1 | All "service all" policies on app_settings, fare_rules, islands, payment_methods, trips, driver_notification_queue scoped to `service_role`; anon/authenticated grants revoked from driver_notification_queue |
+| SEC-2 | Removed broken `OR EXISTS(auth.users)` fallback from driver_profiles and rider_profiles SELECT/UPDATE policies; rider_profiles service insert scoped to service_role |
+| SEC-3 | `trips: driver select relevant` now requires matching island_id + vehicle_type_id + is_online=true via driver_profiles JOIN driver_vehicles subquery |
+| SEC-4 | `ratings` SELECT changed from unauthenticated public read to authenticated-only, scoped to `rater_id = auth.uid() OR ratee_id = auth.uid()` |
+| SEC-7 | `IncomingTrips` and `NearbyDrivers` use positional `$N` parameters — no fmt.Sprintf interpolation |
+| SEC-8 | Rate limiting: POST /login (5/min), POST /offer + /request-ride (10/min) via ulule/limiter/v3 |
+| NEG-TIMEOUT | `process_trip_notification_timeouts()` extended to reset stale `offered` trips back to `requested` after 10 minutes of inactivity (uses `updated_at` as clock) |
 
 ---
 
@@ -158,11 +183,13 @@
 | 1 | Rider ActiveTrip route line never shows | `observeLocationForRouting()` returned early when trip was null on first location emit. Fixed by also calling `fetchRouteIfNeeded` inside `loadTrip()` once trip is populated |
 | 2 | Rider has no feedback that driver is on the way | Added contextual status message card below stepper: blue spinner card when `agreed`, green card when `in_progress` |
 | 4 | Driver "Selesaikan Perjalanan" button shows immediately on trip start | Added `canComplete` computed property in `ActiveTripViewModel` — button only enabled within 150m of dropoff. Errand trips always enabled (no fixed dropoff) |
-| 5 | Only driver marker moves when in_progress; rider marker stays at pickup | When `in_progress`, suppress separate rider marker. Show single green combined marker at driver position titled "Kendaraan Anda" indicating rider is inside the vehicle |
+| 5 | Only driver marker moves when in_progress; rider marker stays at pickup | When `in_progress`, suppress separate rider marker. Show single green combined marker at driver position titled "Kendaraan Anda" |
 | A | Rider negotiation counter button still visible when rounds exhausted | Added `counterExhausted` state to `NegotiationViewModel`; hides button and shows message when server returns exhausted error |
 | B | HomeScreen validate() passes when pickup address typed but coords are zero | Added pickup geocode fallback in `requestRide()` — geocodes pickup address if coords are still 0.0, returns error to user if geocoding fails |
-| C | Rider ActiveTrip route line never shows (second root cause) | `LaunchedEffect` for map overlays was missing `mapView` as a key — the effect ran before `AndroidView` finished initialising. Added `mapView` as a key so overlays redraw when map is ready |
+| C | Rider ActiveTrip route line never shows (second root cause) | `LaunchedEffect` for map overlays was missing `mapView` as a key — the effect ran before `AndroidView` finished initialising. Added `mapView` as a key |
 | D | Pickup pin visible on both apps when rider is in the vehicle | Pickup pin now hidden when `status == "in_progress"` on both driver and rider `ActiveTripScreen` |
+| EARN-TZ | Daily earnings chart used UTC — wrong day after 16:00 WITA | `GetDailyEarnings` generate_series and trip date join now use `AT TIME ZONE 'Asia/Makassar'` |
+| REQ-DUP-SRV | `RequestRide` no duplicate guard on retry | Added `WHERE NOT EXISTS` check for active trip before INSERT; returns existing trip ID if found |
 
 ---
 
@@ -183,12 +210,13 @@
 
 ---
 
-## Database — Current Live State (May 2026)
+## Database — Current Live State (June 2026)
 
 - **Vehicle types:** Car (disabled), Motorbike (enabled), Bentor (enabled)
 - **Islands:** Karakelang 3000m, Kabaruan 1500m, Salibabu 1000m, Sara Besar 500m, Sara Kecil 300m — all with real GeoJSON polygon boundaries
 - **Payment methods:** Cash (enabled), Bank Transfer (disabled), E-Wallet (disabled)
 - **Negotiation setting:** max_negotiation_rounds = 6 (rider gets 3, driver gets 3)
 - **All migrations applied**, no pending migrations
-- **RLS enabled** on all public tables including islands and driver_notification_queue
+- **RLS enabled** on all application tables; `spatial_ref_sys` (PostGIS system table) still lacks RLS — see SEC-5 in TODO
 - **last_lat / last_lng** columns on driver_profiles now populated on every location update
+- **Offered trip expiry:** stale `offered` trips auto-reset to `requested` after 10 minutes via pg_cron
