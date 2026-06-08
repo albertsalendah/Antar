@@ -7,10 +7,10 @@ import com.richard_salendah.driverantar.BuildConfig
 import com.richard_salendah.driverantar.data.model.RefreshRequest
 import com.richard_salendah.driverantar.utils.SessionManager
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import okhttp3.OkHttpClient
-import okhttp3.Request
 import okhttp3.logging.HttpLoggingInterceptor
-import org.json.JSONObject
 import retrofit2.Retrofit
 import retrofit2.converter.gson.GsonConverterFactory
 
@@ -25,30 +25,33 @@ object RetrofitClient {
     // ── Auth interceptor ──────────────────────────────────────────────────────
 
     /**
-     * Intercepts every response. When a 401 is received:
-     *   1. Checks if we have a refresh token.
-     *   2. Calls POST /api/v1/driver/refresh synchronously.
-     *   3. If refresh succeeds → saves new tokens and retries the original request.
-     *   4. If refresh fails (refresh token expired/invalid) → clears session and
-     *      broadcasts a logout intent so the app navigates to the login screen.
+     * Intercepts every 401 response and attempts a silent token refresh.
      *
-     * This runs transparently — ViewModels and Repository never see the 401.
+     * TOKEN-RACE fix: replaced `@Volatile isRefreshing` boolean with a [Mutex].
+     * The old approach let a second simultaneous 401 slip through and fail
+     * immediately because `isRefreshing` was already true.
      *
-     * Note: we use runBlocking because OkHttp interceptors are synchronous.
-     * This is acceptable here since we're already on a background thread.
+     * New behaviour:
+     *   1. First 401 acquires the lock and refreshes.
+     *   2. Second simultaneous 401 waits on the lock.
+     *   3. Once the lock is released, the second request detects the token
+     *      already changed (compares raw token before/after lock) and retries
+     *      with the new token — no second refresh attempt needed.
      */
     private class AuthInterceptor(private val context: Context) : okhttp3.Interceptor {
+
+        private val refreshMutex = Mutex()
 
         override fun intercept(chain: okhttp3.Interceptor.Chain): okhttp3.Response {
             val originalRequest = chain.request()
             val response = chain.proceed(originalRequest)
 
-            // Only attempt refresh on 401 and only when we have a refresh token
+            // Only handle 401 when we have a refresh token to use
             if (response.code != 401 || SessionManager.refreshToken.isBlank()) {
                 return response
             }
 
-            // Skip refresh for auth endpoints themselves (avoid infinite loop)
+            // Skip auth endpoints to avoid refresh loops
             val path = originalRequest.url.encodedPath
             if (path.contains("/refresh") || path.contains("/login") || path.contains("/register")) {
                 return response
@@ -57,34 +60,49 @@ object RetrofitClient {
             Log.d("AuthInterceptor", "401 received — attempting token refresh")
             response.close()
 
+            // Capture the current token BEFORE acquiring the lock so we can detect
+            // whether a concurrent thread already performed the refresh while we waited.
+            val tokenBeforeLock = SessionManager.rawAccessToken
+
             return runBlocking {
-                try {
-                    val refreshed = refreshAccessToken()
-                    if (refreshed) {
-                        Log.d("AuthInterceptor", "Token refreshed — retrying request")
-                        // Retry original request with new token
-                        val newRequest = originalRequest.newBuilder()
-                            .header("Authorization", SessionManager.token)
-                            .build()
-                        chain.proceed(newRequest)
+                refreshMutex.withLock {
+                    if (SessionManager.rawAccessToken != tokenBeforeLock) {
+                        // Token changed while we waited — another thread already refreshed.
+                        // Just retry with the new token; no second refresh needed.
+                        Log.d("AuthInterceptor", "Token already refreshed concurrently — retrying")
+                        chain.proceed(
+                            originalRequest.newBuilder()
+                                .header("Authorization", SessionManager.token)
+                                .build()
+                        )
                     } else {
-                        Log.w("AuthInterceptor", "Refresh failed — logging out")
-                        triggerLogout()
-                        // Return an empty 401 so the caller knows something went wrong
-                        chain.proceed(originalRequest)
+                        try {
+                            val refreshed = refreshAccessToken()
+                            if (refreshed) {
+                                Log.d("AuthInterceptor", "Token refreshed — retrying request")
+                                chain.proceed(
+                                    originalRequest.newBuilder()
+                                        .header("Authorization", SessionManager.token)
+                                        .build()
+                                )
+                            } else {
+                                Log.w("AuthInterceptor", "Refresh failed — logging out")
+                                triggerLogout()
+                                chain.proceed(originalRequest)
+                            }
+                        } catch (e: Exception) {
+                            Log.e("AuthInterceptor", "Error during token refresh", e)
+                            triggerLogout()
+                            chain.proceed(originalRequest)
+                        }
                     }
-                } catch (e: Exception) {
-                    Log.e("AuthInterceptor", "Error during token refresh", e)
-                    triggerLogout()
-                    chain.proceed(originalRequest)
                 }
             }
         }
 
         private suspend fun refreshAccessToken(): Boolean {
             return try {
-                // Direct Retrofit call — uses a separate client without this interceptor
-                // to avoid recursion
+                // Use a separate bare client to avoid triggering this interceptor recursively
                 val refreshApi = Retrofit.Builder()
                     .baseUrl(BuildConfig.BASE_URL)
                     .addConverterFactory(GsonConverterFactory.create())
@@ -100,10 +118,10 @@ object RetrofitClient {
                     val data = response.body()?.data
                     if (data != null) {
                         SessionManager.save(
-                            accessToken = data.access_token,
-                            refreshToken = data.refresh_token,
-                            driverId = data.driver_id,
-                            fullName = data.full_name,
+                            accessToken      = data.access_token,
+                            refreshToken     = data.refresh_token,
+                            driverId         = data.driver_id,
+                            fullName         = data.full_name,
                             expiresInSeconds = 3600L
                         )
                         true
@@ -119,8 +137,6 @@ object RetrofitClient {
 
         private fun triggerLogout() {
             SessionManager.clear()
-            // Broadcast a logout event. MainActivity / any active activity listens
-            // for this intent and navigates to AuthActivity.
             val intent = Intent(ACTION_SESSION_EXPIRED).apply {
                 flags = Intent.FLAG_ACTIVITY_NEW_TASK
                 setPackage(context.packageName)
@@ -131,13 +147,10 @@ object RetrofitClient {
 
     // ── Public constants ──────────────────────────────────────────────────────
 
-    /** Broadcast action sent when the refresh token has expired */
     const val ACTION_SESSION_EXPIRED = "com.richard_salendah.driverantar.SESSION_EXPIRED"
 
     // ── Singleton instance ────────────────────────────────────────────────────
 
-    // Initialized lazily with application context — call initWith(context) once
-    // in DriverApplication.onCreate()
     private lateinit var appContext: Context
 
     fun initWith(context: Context) {

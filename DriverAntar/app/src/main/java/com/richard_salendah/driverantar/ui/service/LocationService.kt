@@ -35,6 +35,8 @@ import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.tasks.await
+import kotlinx.coroutines.TimeoutCancellationException
+import kotlinx.coroutines.withTimeout
 
 /**
  * LocationService is the SINGLE source of GPS data for the entire app.
@@ -65,6 +67,8 @@ class LocationService : Service() {
 
     @RequiresPermission(allOf = [Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION])
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        SessionManager.init(applicationContext)
+
         capturedToken = SessionManager.token
         isRunning     = true
 
@@ -119,8 +123,12 @@ class LocationService : Service() {
         if (capturedToken.isNotBlank()) {
             runBlocking {
                 try {
-                    repository.goOffline(capturedToken)
-                    Log.d(TAG, "Driver marked offline")
+                    withTimeout(3_000) {
+                        repository.goOffline(capturedToken)
+                        Log.d(TAG, "Driver marked offline")
+                    }
+                } catch (e: TimeoutCancellationException) {
+                    Log.w(TAG, "goOffline timed out — pg_cron will handle cleanup")
                 } catch (e: Exception) {
                     Log.e(TAG, "goOffline failed", e)
                 }

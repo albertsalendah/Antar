@@ -1,6 +1,7 @@
 package com.richard_salendah.driverantar.ui.navigation
 
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -40,6 +41,7 @@ import com.richard_salendah.driverantar.ui.trip.WaitingForRiderViewModel
 import com.richard_salendah.driverantar.ui.vehicle.AddVehicleScreen
 import com.richard_salendah.driverantar.ui.vehicle.VehicleViewModel
 import com.richard_salendah.driverantar.utils.SessionManager
+import com.richard_salendah.driverantar.ui.service.LocationService
 
 @Composable
 fun AppNavGraph(
@@ -160,10 +162,24 @@ fun AppNavGraph(
                 navController  = navController,
                 onBack         = { navController.popBackStack() },
                 onTripSelected = { trip ->
-                    TripSelectionHolder.selectedTrip = trip
-                    navController.navigate(
-                        Screen.OfferPrice.route(trip.id, trip.default_fare, trip.trip_type)
-                    )
+                    composable(Screen.IncomingTrips.route) {
+                        val vm = remember { IncomingTripsViewModel(repository) }
+                        IncomingTripsScreen(
+                            viewModel      = vm,
+                            navController  = navController,
+                            onBack         = { navController.popBackStack() },
+                            onTripSelected = { trip ->
+                                if (!LocationService.isRunning) {
+                                    vm.showSnack("Aktifkan mode online terlebih dahulu")
+                                } else {
+                                    TripSelectionHolder.selectedTrip = trip
+                                    navController.navigate(
+                                        Screen.OfferPrice.route(trip.id, trip.default_fare, trip.trip_type)
+                                    )
+                                }
+                            }
+                        )
+                    }
                 }
             )
         }
@@ -182,6 +198,9 @@ fun AppNavGraph(
             val defaultFare = backStack.arguments?.getString("defaultFare")?.toDoubleOrNull() ?: 0.0
             val tripType    = backStack.arguments?.getString("tripType")                       ?: "transport"
             val trip        = TripSelectionHolder.selectedTrip                                 ?: return@composable
+
+            // Clear holder on dispose so a config change doesn't leave a stale reference
+            DisposableEffect(Unit) { onDispose { TripSelectionHolder.selectedTrip = null } }
 
             val vm = remember { OfferPriceViewModel(repository, tripId, defaultFare, tripType) }
             OfferPriceScreen(

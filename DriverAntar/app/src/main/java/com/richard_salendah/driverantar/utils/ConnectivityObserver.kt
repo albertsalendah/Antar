@@ -27,7 +27,7 @@ class ConnectivityObserver private constructor(context: Context) {
         }
         override fun onLost(network: Network) {
             // Another network may still be active — re-check rather than blindly going offline
-            _isOnline.value = cm.activeNetwork != null
+            _isOnline.value = false
         }
         override fun onUnavailable() {
             _isOnline.value = false

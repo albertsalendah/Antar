@@ -301,7 +301,7 @@ private fun formatRupiah(amount: Double): String {
     return "Rp ${fmt.format(amount.roundToInt())}"
 }
 
-private val inputFmt  = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss", Locale.getDefault())
+private val inputFmt  = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss", Locale.US)
 private val outputFmt = SimpleDateFormat("dd MMM yyyy, HH:mm", Locale("id", "ID"))
 
 private fun formatDate(raw: String): String = try {

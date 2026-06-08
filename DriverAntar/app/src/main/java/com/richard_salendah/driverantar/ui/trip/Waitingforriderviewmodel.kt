@@ -8,6 +8,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.richard_salendah.driverantar.data.remote.DriverRepository
 import com.richard_salendah.driverantar.ui.supabase.SupabaseClientHolder
+import com.richard_salendah.driverantar.utils.SessionManager
 import io.github.jan.supabase.postgrest.query.filter.FilterOperation
 import io.github.jan.supabase.postgrest.query.filter.FilterOperator
 import io.github.jan.supabase.realtime.PostgresAction
@@ -15,6 +16,8 @@ import io.github.jan.supabase.realtime.RealtimeChannel
 import io.github.jan.supabase.realtime.channel
 import io.github.jan.supabase.realtime.postgresChangeFlow
 import io.github.jan.supabase.realtime.realtime
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.launchIn
 import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.launch
@@ -47,19 +50,22 @@ class WaitingForRiderViewModel(
     var uiState by mutableStateOf<WaitingUiState>(WaitingUiState.Waiting); private set
 
     private var realtimeChannel: RealtimeChannel? = null
+    private var pollJob: Job? = null
 
-    init { subscribeToTripChanges() }
+    init {
+        subscribeToTripChanges()
+        startPolling()
+    }
+
+    // ── Realtime (primary) ────────────────────────────────────────────────────
 
     private fun subscribeToTripChanges() {
         viewModelScope.launch {
             try {
                 val client = SupabaseClientHolder.client
 
-                // Use a timestamp suffix to guarantee a unique channel name on every
-                // VM creation. Without this, navigating CounterDecision → WaitingForRider
-                // creates a channel with the same name as the previous VM's channel
-                // before onCleared() async cleanup finishes, causing the new subscription
-                // to silently fail and leaving the driver stuck on this screen.
+                // Timestamp suffix prevents channel-name collision when navigating
+                // CounterDecision → WaitingForRider before the old VM's onCleared finishes.
                 val channel = client.channel("trip-watch-$tripId-${System.currentTimeMillis()}")
                 realtimeChannel = channel
 
@@ -67,46 +73,99 @@ class WaitingForRiderViewModel(
                     table = "trips"
                     filter(FilterOperation("id", FilterOperator.EQ, tripId))
                 }.onEach { action ->
-                    handleUpdate(action.record)
+                    handleRealtimeUpdate(action.record)
                 }.launchIn(viewModelScope)
 
                 channel.subscribe()
                 Log.d(TAG, "Subscribed to trip $tripId")
 
             } catch (e: Exception) {
-                Log.e(TAG, "Realtime subscription failed", e)
-                uiState = WaitingUiState.Error(
-                    "Could not connect to real-time updates. Check your connection."
-                )
+                // Realtime unavailable — polling fallback already running, no action needed.
+                // Do NOT set Error state; the waiting spinner stays visible and polling handles it.
+                Log.e(TAG, "Realtime subscription failed — polling fallback active", e)
             }
         }
     }
 
-    private fun handleUpdate(
+    private fun handleRealtimeUpdate(
         record: Map<String, kotlinx.serialization.json.JsonElement>
     ) {
-        val status             = record["status"]?.jsonPrimitive?.content          ?: return
+        val status             = record["status"]?.jsonPrimitive?.content              ?: return
         val lastOfferBy        = record["last_offer_by"]?.jsonPrimitive?.content
         val newFare            = record["offered_fare"]?.jsonPrimitive?.content?.toDoubleOrNull()
-        // Carry the actual counter count from the DB row so CounterDecision
-        // shows the correct remaining attempts instead of always starting at 0.
         val driverCounterCount = record["driver_counter_count"]?.jsonPrimitive?.content
             ?.toIntOrNull() ?: 0
 
-        Log.d(TAG, "Trip update → status=$status last_offer_by=$lastOfferBy")
+        Log.d(TAG, "Realtime → status=$status last_offer_by=$lastOfferBy")
+        applyStatus(status, lastOfferBy, newFare, driverCounterCount)
+    }
 
+    // ── Polling fallback (5 s) ────────────────────────────────────────────────
+    // Fires every 5 s covering WebSocket drops on poor Talaud connectivity.
+    // Stops automatically once Realtime (or itself) resolves to a terminal state.
+
+    private fun startPolling() {
+        pollJob = viewModelScope.launch {
+            while (true) {
+                delay(5_000L)
+
+                // Stop polling once state is resolved
+                val current = uiState
+                if (current !is WaitingUiState.Waiting) break
+
+                runCatching {
+                    repository.getActiveTrip(SessionManager.token)
+                        .onSuccess { trip ->
+                            when {
+                                trip == null -> {
+                                    // Trip is no longer in active states (offered/agreed/in_progress).
+                                    // Most likely the rider rejected — reset to requested.
+                                    Log.d(TAG, "Poll: no active trip found — treating as rejected")
+                                    uiState = WaitingUiState.Rejected
+                                }
+                                trip.id != tripId -> {
+                                    // A different trip became active — should not normally happen here
+                                    return@onSuccess
+                                }
+                                else -> applyStatus(
+                                    status             = trip.status,
+                                    lastOfferBy        = trip.last_offer_by,
+                                    newFare            = trip.offered_fare,
+                                    driverCounterCount = trip.driver_counter_count,
+                                )
+                            }
+                        }
+                }.onFailure { e ->
+                    Log.w(TAG, "Poll error (non-fatal)", e)
+                }
+            }
+        }
+    }
+
+    // ── Shared state transition logic ─────────────────────────────────────────
+    // Used by both Realtime and polling so both paths behave identically.
+
+    private fun applyStatus(
+        status: String,
+        lastOfferBy: String?,
+        newFare: Double?,
+        driverCounterCount: Int,
+    ) {
         uiState = when {
             status == "agreed"    -> WaitingUiState.Agreed
             status == "cancelled" -> WaitingUiState.Cancelled
             status == "requested" -> WaitingUiState.Rejected
             status == "offered" && lastOfferBy == "rider" ->
                 WaitingUiState.RiderCountered(newFare ?: 0.0, driverCounterCount)
-            else -> WaitingUiState.Waiting
+            else -> return // still offered/driver-turn — no change
         }
     }
 
+    // ── Cleanup ───────────────────────────────────────────────────────────────
+
     override fun onCleared() {
         super.onCleared()
+        pollJob?.cancel()
         viewModelScope.launch {
             try {
                 realtimeChannel?.let { ch ->

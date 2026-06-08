@@ -28,6 +28,11 @@ class AuthViewModel(private val repository: DriverRepository) : ViewModel() {
     // ── Register ──────────────────────────────────────────────────────────────
 
     fun register(fullName: String, email: String, password: String, phone: String) {
+        val trimmedPhone = phone.trim()
+        if (!trimmedPhone.startsWith("0") && !trimmedPhone.startsWith("+62")) {
+            state = AuthState.Error("Nomor telepon harus dimulai dengan 0 atau +62")
+            return
+        }
         viewModelScope.launch {
             state = AuthState.Loading
             repository.register(fullName.trim(), email.trim(), password, phone.trim())

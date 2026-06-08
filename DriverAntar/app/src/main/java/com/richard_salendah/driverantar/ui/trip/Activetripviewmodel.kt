@@ -18,6 +18,8 @@ import io.github.jan.supabase.realtime.RealtimeChannel
 import io.github.jan.supabase.realtime.channel
 import io.github.jan.supabase.realtime.postgresChangeFlow
 import io.github.jan.supabase.realtime.realtime
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.launchIn
 import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.launch
@@ -43,13 +45,18 @@ class ActiveTripViewModel(
     var uiState by mutableStateOf<ActiveTripUiState>(ActiveTripUiState.Loading); private set
 
     // ── Route state ───────────────────────────────────────────────────────────
-    var routePoints        by mutableStateOf<List<GeoPoint>>(emptyList()); private set
+    var routePoints           by mutableStateOf<List<GeoPoint>>(emptyList()); private set
     private var lastRouteFetchLat = 0.0
     private var lastRouteFetchLng = 0.0
 
     // ── Current driver GeoPoint for map marker ────────────────────────────────
     var currentGeoPoint by mutableStateOf(GeoPoint(0.0, 0.0)); private set
 
+    /**
+     * Whether the complete button should be enabled.
+     * For transport trips: driver must be within 150 m of dropoff.
+     * For errand trips or when dropoff is unset: always enabled.
+     */
     val canComplete: Boolean
         get() {
             val t = trip ?: return false
@@ -63,9 +70,13 @@ class ActiveTripViewModel(
 
     private var realtimeChannel: RealtimeChannel? = null
 
+    // CONN-8: polling fallback for when WebSocket drops mid-trip
+    private var statusPollJob: Job? = null
+
     init {
         loadTrip()
         subscribeToUpdates()
+        startStatusPolling()
         observeLocationForRouting()
     }
 
@@ -81,6 +92,69 @@ class ActiveTripViewModel(
                 .onFailure { e ->
                     uiState = ActiveTripUiState.Error(e.message ?: "Failed to load trip")
                 }
+        }
+    }
+
+    // ── Realtime subscription (primary) ───────────────────────────────────────
+
+    private fun subscribeToUpdates() {
+        viewModelScope.launch {
+            try {
+                val client  = SupabaseClientHolder.client
+                val channel = client.channel("active-trip-$tripId-${System.currentTimeMillis()}")
+                realtimeChannel = channel
+
+                channel.postgresChangeFlow<PostgresAction.Update>(schema = "public") {
+                    table  = "trips"
+                    filter(FilterOperation("id", FilterOperator.EQ, tripId))
+                }.onEach { action ->
+                    val status = action.record["status"]?.jsonPrimitive?.content ?: return@onEach
+                    Log.d(TAG, "Realtime → status=$status")
+                    loadTrip()
+                    applyTerminalStatus(status)
+                }.launchIn(viewModelScope)
+
+                channel.subscribe()
+            } catch (e: Exception) {
+                Log.w(TAG, "Realtime subscription failed — polling fallback active", e)
+            }
+        }
+    }
+
+    // ── Polling fallback (6 s) — CONN-8 ──────────────────────────────────────
+    // Covers WebSocket drops on poor Talaud connectivity.
+    // Skips during ActionLoading to avoid overwriting action results.
+
+    private fun startStatusPolling() {
+        statusPollJob = viewModelScope.launch {
+            while (true) {
+                delay(6_000L)
+
+                // Don't interfere while a driver action is in flight
+                if (uiState is ActiveTripUiState.ActionLoading) continue
+
+                runCatching {
+                    repository.getActiveTrip(SessionManager.token)
+                        .onSuccess { t ->
+                            if (t == null || t.id != tripId) return@onSuccess
+                            trip = t
+                            applyTerminalStatus(t.status)
+                        }
+                }.onFailure { e ->
+                    Log.w(TAG, "Status poll error (non-fatal)", e)
+                }
+            }
+        }
+    }
+
+    private fun applyTerminalStatus(status: String) {
+        when (status) {
+            "completed" -> uiState = ActiveTripUiState.Completed
+            "cancelled" -> uiState = ActiveTripUiState.Cancelled
+            else        -> if (uiState !is ActiveTripUiState.ActionLoading &&
+                uiState !is ActiveTripUiState.Confirming) {
+                uiState = ActiveTripUiState.Idle
+            }
         }
     }
 
@@ -116,58 +190,15 @@ class ActiveTripViewModel(
         lastRouteFetchLng = driverLng
 
         viewModelScope.launch {
-            val pts = RouteHelper.fetchRoute(driverLat, driverLng, destLat?:0.0, destLng?:0.0)
+            val pts = RouteHelper.fetchRoute(driverLat, driverLng, destLat ?: 0.0, destLng ?: 0.0)
             if (pts != null) routePoints = pts
         }
     }
 
-    // ── Realtime subscription ─────────────────────────────────────────────────
-
-    private fun subscribeToUpdates() {
-        viewModelScope.launch {
-            try {
-                val client  = SupabaseClientHolder.client
-                val channel = client.channel("active-trip-$tripId-${System.currentTimeMillis()}")
-                realtimeChannel = channel
-
-                channel.postgresChangeFlow<PostgresAction.Update>(schema = "public") {
-                    table  = "trips"
-                    filter(FilterOperation("id", FilterOperator.EQ, tripId))
-                }.onEach { action ->
-                    val status = action.record["status"]?.jsonPrimitive?.content ?: return@onEach
-                    Log.d(TAG, "Active trip status update → $status")
-                    loadTrip()
-                }.launchIn(viewModelScope)
-
-                channel.subscribe()
-            } catch (e: Exception) {
-                Log.w(TAG, "Realtime subscription failed for active trip", e)
-            }
-        }
-    }
-
-    // ── Trip actions ──────────────────────────────────────────────────────────
-
-    fun startTrip() {
-        viewModelScope.launch {
-            uiState = ActiveTripUiState.ActionLoading
-            repository.startTrip(SessionManager.token, tripId)
-                .onSuccess {
-                    loadTrip()
-                    // Reset route so it refetches toward dropoff after start
-                    routePoints        = emptyList()
-                    lastRouteFetchLat  = 0.0
-                    lastRouteFetchLng  = 0.0
-                }
-                .onFailure { e ->
-                    uiState = ActiveTripUiState.Error(
-                        e.message ?: "Failed to start trip — please try again"
-                    )
-                }
-        }
-    }
+    // ── Trip actions — CONN-7: guard against double-tap ───────────────────────
 
     fun arriveAtPickup() {
+        if (uiState is ActiveTripUiState.ActionLoading) return
         viewModelScope.launch {
             uiState = ActiveTripUiState.ActionLoading
             repository.arriveAtPickup(SessionManager.token, tripId)
@@ -178,7 +209,28 @@ class ActiveTripViewModel(
         }
     }
 
+    fun startTrip() {
+        if (uiState is ActiveTripUiState.ActionLoading) return
+        viewModelScope.launch {
+            uiState = ActiveTripUiState.ActionLoading
+            repository.startTrip(SessionManager.token, tripId)
+                .onSuccess {
+                    loadTrip()
+                    // Reset route so it refetches toward dropoff after start
+                    routePoints       = emptyList()
+                    lastRouteFetchLat = 0.0
+                    lastRouteFetchLng = 0.0
+                }
+                .onFailure { e ->
+                    uiState = ActiveTripUiState.Error(
+                        e.message ?: "Failed to start trip — please try again"
+                    )
+                }
+        }
+    }
+
     fun completeTrip() {
+        if (uiState is ActiveTripUiState.ActionLoading) return
         viewModelScope.launch {
             uiState = ActiveTripUiState.ActionLoading
             repository.completeTrip(SessionManager.token, tripId)
@@ -195,6 +247,7 @@ class ActiveTripViewModel(
     fun dismissCancel() { uiState = ActiveTripUiState.Idle }
 
     fun confirmCancel() {
+        if (uiState is ActiveTripUiState.ActionLoading) return
         viewModelScope.launch {
             uiState = ActiveTripUiState.ActionLoading
             repository.cancelTrip(SessionManager.token, tripId)
@@ -211,6 +264,7 @@ class ActiveTripViewModel(
 
     override fun onCleared() {
         super.onCleared()
+        statusPollJob?.cancel()
         viewModelScope.launch {
             try {
                 realtimeChannel?.let { ch ->
