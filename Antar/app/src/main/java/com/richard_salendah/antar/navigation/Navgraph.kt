@@ -2,6 +2,7 @@ package com.richard_salendah.antar.navigation
 
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.NavHostController
 import androidx.navigation.NavType
 import androidx.navigation.compose.NavHost
@@ -10,6 +11,7 @@ import androidx.navigation.navArgument
 import com.richard_salendah.antar.ui.auth.LoginScreen
 import com.richard_salendah.antar.ui.auth.RegisterScreen
 import com.richard_salendah.antar.ui.history.TripHistoryScreen
+import com.richard_salendah.antar.ui.history.TripHistoryViewModel
 import com.richard_salendah.antar.ui.home.HomeScreen
 import com.richard_salendah.antar.ui.profile.ProfileScreen
 import com.richard_salendah.antar.ui.trip.ActiveTripScreen
@@ -24,11 +26,9 @@ fun AntarNavGraph(
     startDestination: String,
 ) {
     // ── FCM deep link observer ────────────────────────────────────────────────
-    // DEEP-1: DeepLinkHandler uses extraBufferCapacity = 1. If two FCM
-    // notifications arrive while the app is killed, only the last event
-    // survives. This is acceptable for the current Talaud use-case where
-    // simultaneous competing offers are unlikely, but would need a larger
-    // buffer or persistent queue for higher-volume deployments.
+    // DEEP-1 fixed: extraBufferCapacity=4 ensures FCM tap events survive cold-start
+    // before the NavGraph collector subscribes. tryEmit buffers up to 4 events;
+    // overflow (5+ simultaneous taps) is still dropped but unrealistic for Talaud volume.
     LaunchedEffect(navController) {
         DeepLinkHandler.events.collect { event ->
             when (event) {
@@ -91,37 +91,30 @@ fun AntarNavGraph(
         }
 
         composable(Screen.History.route) {
-            // RATE-DUP: onRateTrip now receives (tripId, onDone). We navigate
-            // to RateDriver and call onDone() when that screen finishes so the
-            // ViewModel can clear the in-flight state and mark the trip as rated
-            // without requiring a full list refresh.
+            val historyVm: TripHistoryViewModel = viewModel()
+            val savedState = it.savedStateHandle
+
+            // RATE-DUP: watch for rating completions written by RateDriver on pop.
+            // StateFlow collection is scoped to this composable — cancelled automatically
+            // on dispose, replacing the previous observeForever which leaked the observer.
+            LaunchedEffect(Unit) {
+                savedState.getStateFlow("last_rated_trip", "").collect { tripId ->
+                    if (tripId.isNotBlank()) {
+                        historyVm.onRatingDone(tripId)
+                        savedState["last_rated_trip"] = ""
+                    }
+                }
+            }
+
             TripHistoryScreen(
                 onBack     = { navController.popBackStack() },
-                onRateTrip = { tripId, onDone ->
-                    navController.navigate(
-                        Screen.RateDriver.route(tripId, fromHistory = true)
-                    )
-                    // Store the done callback so RateDriver can invoke it.
-                    // We use the back-stack saved state handle as a lightweight
-                    // one-shot communication channel between destinations.
-                    navController.currentBackStackEntry
-                        ?.savedStateHandle
-                        ?.set("rate_done_callback_$tripId", true)
-                    // Observe when RateDriver pops and call onDone.
-                    // The back-stack entry for History is the previous entry
-                    // after RateDriver is on top — we watch for its return.
-                    navController.getBackStackEntry(Screen.History.route)
-                        .savedStateHandle
-                        .getLiveData<Boolean>("rated_$tripId")
-                        .observeForever { rated ->
-                            if (rated == true) {
-                                onDone()
-                                navController.getBackStackEntry(Screen.History.route)
-                                    .savedStateHandle
-                                    .remove<Boolean>("rated_$tripId")
-                            }
-                        }
+                onRateTrip = { tripId, _ ->
+                    // onDone callback not used here — RateDriver signals back via
+                    // savedStateHandle "last_rated_trip" key on pop instead.
+                    historyVm.markRatingInFlight(tripId)
+                    navController.navigate(Screen.RateDriver.route(tripId, fromHistory = true))
                 },
+                viewModel  = historyVm,
             )
         }
 
@@ -221,11 +214,12 @@ fun AntarNavGraph(
                 tripId = tripId,
                 onDone = {
                     if (fromHistory) {
-                        // RATE-DUP: signal the History back-stack entry that
-                        // this trip has been rated before popping back.
+                        // RATE-DUP: signal History via a single "last_rated_trip" key
+                        // so TripHistoryViewModel.onRatingDone() is called on pop.
+                        // Replaced the previous per-trip "rated_$tripId" key + observeForever.
                         navController.previousBackStackEntry
                             ?.savedStateHandle
-                            ?.set("rated_$tripId", true)
+                            ?.set("last_rated_trip", tripId)
                         navController.popBackStack()
                     } else {
                         navController.navigate(Screen.Home.route) {

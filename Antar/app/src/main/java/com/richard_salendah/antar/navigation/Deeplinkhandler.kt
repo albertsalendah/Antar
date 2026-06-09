@@ -23,7 +23,7 @@ sealed class DeepLinkEvent {
  * subscribes is not lost (e.g. cold start from notification tap).
  */
 object DeepLinkHandler {
-    private val _events = MutableSharedFlow<DeepLinkEvent>(extraBufferCapacity = 1)
+    private val _events = MutableSharedFlow<DeepLinkEvent>(extraBufferCapacity = 4)
     val events: SharedFlow<DeepLinkEvent> = _events.asSharedFlow()
 
     fun emit(event: DeepLinkEvent) {
