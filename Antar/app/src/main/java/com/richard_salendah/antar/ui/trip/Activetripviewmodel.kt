@@ -34,7 +34,17 @@ class ActiveTripViewModel(app: Application) : AndroidViewModel(app) {
     var loading by mutableStateOf(false)
     var error   by mutableStateOf<String?>(null)
 
-    // ── Location tracker — created lazily after trip loads (needs driverId) ──
+    // CONN-3: exposed when N consecutive poll failures occur so the screen
+    // can show a warning instead of silently showing stale data.
+    var connectionLost by mutableStateOf(false)
+        private set
+
+    // CONN-5: tracks when the last status update was received (millis).
+    // The screen observes this and shows a refresh hint after 30 s of silence.
+    var lastStatusUpdateMs by mutableStateOf(System.currentTimeMillis())
+        private set
+
+    // ── Location tracker ──────────────────────────────────────────────────────
     private var locationTracker: LocationTracker? = null
     private val _driverLocation = MutableStateFlow<DriverLocation?>(null)
     val driverLocation: StateFlow<DriverLocation?> = _driverLocation.asStateFlow()
@@ -51,13 +61,17 @@ class ActiveTripViewModel(app: Application) : AndroidViewModel(app) {
     private var statusPoll:    Job?             = null
     private var started                         = false
 
+    // ── Polling failure tracking (CONN-3) ─────────────────────────────────────
+    private var consecutivePollFailures = 0
+    private val pollFailureThreshold    = 3
+
     fun start(tripId: String, onCompleted: () -> Unit) {
         if (started) return
         started = true
-        loadTrip(tripId)                         // creates tracker after trip loads
+        loadTrip(tripId)
         subscribeRealtime(tripId, onCompleted)
         startStatusPolling(tripId, onCompleted)
-        observeLocationForRouting()              // collect from _driverLocation whenever it emits
+        observeLocationForRouting()
     }
 
     // ── Trip loading ──────────────────────────────────────────────────────────
@@ -73,10 +87,8 @@ class ActiveTripViewModel(app: Application) : AndroidViewModel(app) {
                         return@runCatching
                     }
                     trip = t
+                    lastStatusUpdateMs = System.currentTimeMillis()
 
-                    // Create and start location tracker now that we know the driver ID.
-                    // RealtimeLocationTracker uses Supabase Realtime as primary and
-                    // PollingLocationTracker (15s) as fallback.
                     if (locationTracker == null) {
                         val driverProfileId = t.driverId.orEmpty()
                         val tracker = RealtimeLocationTracker(
@@ -87,7 +99,6 @@ class ActiveTripViewModel(app: Application) : AndroidViewModel(app) {
                         locationTracker = tracker
                         tracker.start(tripId, viewModelScope)
 
-                        // Bridge tracker emissions into our shared StateFlow
                         viewModelScope.launch {
                             tracker.location.collect { loc ->
                                 _driverLocation.value = loc
@@ -95,7 +106,6 @@ class ActiveTripViewModel(app: Application) : AndroidViewModel(app) {
                         }
                     }
 
-                    // Trigger route fetch immediately if location already arrived
                     val loc = _driverLocation.value
                     if (loc != null) fetchRouteIfNeeded(loc.lat, loc.lng, t)
 
@@ -109,10 +119,6 @@ class ActiveTripViewModel(app: Application) : AndroidViewModel(app) {
 
     // ── Route fetching ────────────────────────────────────────────────────────
 
-    /**
-     * Observes driver location changes and re-fetches the OSRM route when the
-     * driver has moved more than 50 metres from the last fetch point.
-     */
     private fun observeLocationForRouting() {
         viewModelScope.launch {
             _driverLocation.collect { loc ->
@@ -155,6 +161,17 @@ class ActiveTripViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    // CONN-4: called by the screen when connectivity is restored.
+    // Resets the last fetch point so fetchRouteIfNeeded triggers a fresh fetch
+    // on the next location emission.
+    fun retryRoute() {
+        lastRouteFetchLat = 0.0
+        lastRouteFetchLng = 0.0
+        val loc = _driverLocation.value ?: return
+        val t   = trip ?: return
+        fetchRouteIfNeeded(loc.lat, loc.lng, t)
+    }
+
     // ── Trip status Realtime ──────────────────────────────────────────────────
 
     private fun subscribeRealtime(tripId: String, onCompleted: () -> Unit) {
@@ -170,7 +187,10 @@ class ActiveTripViewModel(app: Application) : AndroidViewModel(app) {
                     if (resp.isSuccessful) {
                         val t = resp.body()?.data ?: return@onEach
                         trip = t
-                        // Reset route destination when status transitions to in_progress
+                        lastStatusUpdateMs  = System.currentTimeMillis()
+                        consecutivePollFailures = 0
+                        connectionLost      = false
+
                         if (t.status == "in_progress") {
                             lastRouteFetchLat = 0.0
                             lastRouteFetchLng = 0.0
@@ -189,16 +209,32 @@ class ActiveTripViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    // CONN-3 + CONN-5: polling tracks consecutive failures and records the
+    // timestamp of the last successful status update.
     private fun startStatusPolling(tripId: String, onCompleted: () -> Unit) {
         statusPoll = viewModelScope.launch {
             while (true) {
                 delay(6_000L)
-                runCatching {
+                val success = runCatching {
                     val resp = api.getTrip(tripId)
                     if (resp.isSuccessful) {
-                        val t = resp.body()?.data ?: return@runCatching
+                        val t = resp.body()?.data ?: return@runCatching false
                         trip = t
+                        lastStatusUpdateMs      = System.currentTimeMillis()
+                        consecutivePollFailures = 0
+                        connectionLost          = false
                         if (t.status == "completed") { teardown(); onCompleted() }
+                        true
+                    } else {
+                        false
+                    }
+                }.getOrElse { false }
+
+                if (!success) {
+                    consecutivePollFailures++
+                    if (consecutivePollFailures >= pollFailureThreshold) {
+                        // CONN-3: surface connection loss to the screen
+                        connectionLost = true
                     }
                 }
             }

@@ -30,6 +30,8 @@ import androidx.compose.material.icons.filled.DirectionsCar
 import androidx.compose.material.icons.filled.LocationOn
 import androidx.compose.material.icons.filled.MyLocation
 import androidx.compose.material.icons.filled.Person
+import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.WifiOff
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
@@ -42,12 +44,14 @@ import androidx.compose.material3.IconButtonDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -68,6 +72,9 @@ import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.richard_salendah.antar.data.model.TripResponse
+import com.richard_salendah.antar.ui.common.OfflineBanner
+import com.richard_salendah.antar.ui.common.rememberConnectivityState
+import kotlinx.coroutines.delay
 import org.osmdroid.config.Configuration
 import org.osmdroid.tileprovider.tilesource.TileSourceFactory
 import org.osmdroid.util.GeoPoint
@@ -98,7 +105,6 @@ fun ActiveTripScreen(
     val maxSheetHeight: Dp = screenHeightDp * 0.75f
     val minSheetHeight: Dp = 195.dp
 
-    // mapView is remembered state so LaunchedEffect can use it as a key
     var mapView        by remember { mutableStateOf<MapView?>(null) }
     var sheetExpansion by remember { mutableFloatStateOf(0f) }
     var dragAccum      by remember { mutableFloatStateOf(0f) }
@@ -108,12 +114,35 @@ fun ActiveTripScreen(
     val driverLocation by viewModel.driverLocation.collectAsState()
     val routePoints    = viewModel.routePoints
 
+    // CONN-3: observe connectivity state to show OfflineBanner and trigger retryRoute
+    val isOnline by rememberConnectivityState()
+    var wasOffline by remember { mutableStateOf(false) }
+
+    // CONN-5: track elapsed time since last status update for stale hint
+    var now by remember { mutableLongStateOf(System.currentTimeMillis()) }
+    LaunchedEffect(Unit) {
+        while (true) {
+            delay(5_000L)
+            now = System.currentTimeMillis()
+        }
+    }
+    val secondsSinceUpdate = (now - viewModel.lastStatusUpdateMs) / 1000L
+    val showStaleHint = secondsSinceUpdate > 30 && trip?.status != "completed"
+
     LaunchedEffect(Unit) {
         Configuration.getInstance().userAgentValue = context.packageName
         viewModel.start(tripId, onTripCompleted)
     }
 
-    // Centre map on driver; midpoint driver+dropoff when in_progress
+    // CONN-4: when connectivity is restored after an outage, reset route
+    // fetch state so the polyline is re-fetched with fresh driver location.
+    LaunchedEffect(isOnline) {
+        if (isOnline && wasOffline) {
+            viewModel.retryRoute()
+        }
+        wasOffline = !isOnline
+    }
+
     LaunchedEffect(driverLocation, trip?.status) {
         val map = mapView ?: return@LaunchedEffect
         val loc = driverLocation ?: return@LaunchedEffect
@@ -131,15 +160,11 @@ fun ActiveTripScreen(
         }
     }
 
-    // ── Overlay update ────────────────────────────────────────────────────────
-    // mapView is included as a key so this re-runs when AndroidView finishes
-    // initialising — which is what was causing the route line to never appear.
     LaunchedEffect(mapView, driverLocation, trip, routePoints) {
         val map = mapView ?: return@LaunchedEffect
         updateOverlays(map, trip, driverLocation, routePoints)
     }
 
-    // MapView lifecycle
     DisposableEffect(lifecycle) {
         val observer = LifecycleEventObserver { _, event ->
             when (event) {
@@ -154,7 +179,6 @@ fun ActiveTripScreen(
 
     Box(modifier = Modifier.fillMaxSize()) {
 
-        // ── Full-screen map ───────────────────────────────────────────────────
         AndroidView(
             factory = { ctx ->
                 MapView(ctx).apply {
@@ -168,7 +192,6 @@ fun ActiveTripScreen(
             modifier = Modifier.fillMaxSize(),
         )
 
-        // ── Recenter FAB ──────────────────────────────────────────────────────
         if (driverLocation != null) {
             FloatingActionButton(
                 onClick = {
@@ -199,6 +222,68 @@ fun ActiveTripScreen(
                 .background(Color.White),
         ) {
             Column(modifier = Modifier.fillMaxSize()) {
+
+                // CONN-3: OfflineBanner at the very top of the sheet
+                OfflineBanner()
+
+                // CONN-3: connection-lost warning when polling has repeatedly failed
+                if (viewModel.connectionLost && isOnline) {
+                    Card(
+                        modifier  = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 16.dp, vertical = 4.dp),
+                        shape     = RoundedCornerShape(10.dp),
+                        colors    = CardDefaults.cardColors(containerColor = Color(0xFFFFF3E0)),
+                        elevation = CardDefaults.cardElevation(0.dp),
+                    ) {
+                        Row(
+                            modifier  = Modifier.padding(10.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            Icon(
+                                Icons.Default.WifiOff, null,
+                                tint     = Amber,
+                                modifier = Modifier.size(16.dp),
+                            )
+                            Text(
+                                "Koneksi bermasalah — data mungkin tidak terkini",
+                                style    = MaterialTheme.typography.labelSmall.copy(color = Amber),
+                                modifier = Modifier.weight(1f),
+                            )
+                        }
+                    }
+                }
+
+                // CONN-5: stale status hint after 30 s without an update
+                if (showStaleHint) {
+                    Card(
+                        modifier  = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 16.dp, vertical = 4.dp),
+                        shape     = RoundedCornerShape(10.dp),
+                        colors    = CardDefaults.cardColors(containerColor = Color(0xFFF3E5F5)),
+                        elevation = CardDefaults.cardElevation(0.dp),
+                    ) {
+                        Row(
+                            modifier  = Modifier.padding(10.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            Icon(
+                                Icons.Default.Refresh, null,
+                                tint     = Color(0xFF7B1FA2),
+                                modifier = Modifier.size(16.dp),
+                            )
+                            Text(
+                                "Perjalanan mungkin sudah selesai, tarik untuk refresh",
+                                style    = MaterialTheme.typography.labelSmall.copy(
+                                    color = Color(0xFF7B1FA2)),
+                                modifier = Modifier.weight(1f),
+                            )
+                        }
+                    }
+                }
 
                 // Drag handle
                 Box(
@@ -249,7 +334,7 @@ fun ActiveTripScreen(
 
                         Spacer(Modifier.height(8.dp))
 
-                        // Status message card
+                        // Status message cards
                         when (trip.status) {
                             "agreed" -> Card(
                                 modifier  = Modifier.fillMaxWidth(),
@@ -327,7 +412,7 @@ fun ActiveTripScreen(
 
                         Spacer(Modifier.height(8.dp))
 
-                        // Expanded: fare + detail
+                        // Expanded detail
                         if (sheetExpansion > 0.1f) {
                             Card(
                                 modifier  = Modifier.fillMaxWidth(),
@@ -509,7 +594,6 @@ private fun updateOverlays(
 
     val status = trip.status
 
-    // ── Route line ────────────────────────────────────────────────────────────
     if (routePoints.isNotEmpty()) {
         val lineColor = if (status == "in_progress")
             android.graphics.Color.parseColor("#E53935")
@@ -528,9 +612,6 @@ private fun updateOverlays(
         }
     }
 
-    // ── Pickup pin ────────────────────────────────────────────────────────────
-    // Hidden when in_progress — rider is already in the vehicle so the
-    // pickup location is no longer relevant on the map.
     if (trip.pickupLat != 0.0 && status != "in_progress") {
         Marker(map).apply {
             id       = "pickup"
@@ -543,7 +624,6 @@ private fun updateOverlays(
         }
     }
 
-    // ── Dropoff pin — transport + in_progress only ────────────────────────────
     if (status == "in_progress" &&
         trip.tripType == "transport" &&
         trip.dropoffLat != 0.0) {
@@ -558,7 +638,6 @@ private fun updateOverlays(
         }
     }
 
-    // ── Driver / vehicle pin ──────────────────────────────────────────────────
     driverLoc?.let { loc ->
         val (pinColor, pinTitle) = when (status) {
             "arrived"     -> Pair(0xFFF57F17.toInt(), "Driver menunggu Anda")

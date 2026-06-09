@@ -29,6 +29,14 @@ class SearchingViewModel(app: Application) : AndroidViewModel(app) {
     var cancelLoading by mutableStateOf(false)
     var cancelError   by mutableStateOf<String?>(null)
 
+    // CONN-1: expose consecutive polling failures so the screen can surface them
+    // instead of letting the radar spin silently forever.
+    var pollingError  by mutableStateOf<String?>(null)
+        private set
+
+    private var consecutiveFailures = 0
+    private val failureThreshold    = 2
+
     private var channel: RealtimeChannel? = null
     private var pollJob: Job?             = null
     private var started                   = false
@@ -54,13 +62,15 @@ class SearchingViewModel(app: Application) : AndroidViewModel(app) {
                 val ch = supabase.channel("trip_search_$tripId")
                 channel = ch
 
-                // ▼ Fix: use filter() function instead of filter = "..." property
                 ch.postgresChangeFlow<PostgresAction.Update>(schema = "public") {
                     table = "trips"
                     filter("id", FilterOperator.EQ, tripId)
                 }.onEach { action ->
                     val newStatus = action.record["status"]
                         ?.jsonPrimitive?.content ?: return@onEach
+                    // A successful Realtime update clears any polling error
+                    pollingError        = null
+                    consecutiveFailures = 0
                     handleStatus(newStatus, onOfferReceived, onTripCancelled)
                 }.launchIn(viewModelScope)
 
@@ -79,11 +89,26 @@ class SearchingViewModel(app: Application) : AndroidViewModel(app) {
         pollJob = viewModelScope.launch {
             while (true) {
                 delay(5_000L)
-                runCatching {
+                val success = runCatching {
                     val resp = api.getTrip(tripId)
                     if (resp.isSuccessful) {
-                        val status = resp.body()?.data?.status ?: return@runCatching
+                        val status = resp.body()?.data?.status ?: return@runCatching false
+                        consecutiveFailures = 0
+                        pollingError        = null
                         handleStatus(status, onOfferReceived, onTripCancelled)
+                        true
+                    } else {
+                        false
+                    }
+                }.getOrElse { false }
+
+                // CONN-1: after failureThreshold consecutive failures surface
+                // an error so the screen can warn the rider instead of spinning
+                // the radar animation indefinitely with no feedback.
+                if (!success) {
+                    consecutiveFailures++
+                    if (consecutiveFailures >= failureThreshold) {
+                        pollingError = "Koneksi bermasalah — mencoba lagi…"
                     }
                 }
             }

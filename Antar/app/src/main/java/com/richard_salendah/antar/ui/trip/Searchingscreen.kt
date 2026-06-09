@@ -25,6 +25,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.DirectionsCar
 import androidx.compose.material.icons.filled.LocationOn
+import androidx.compose.material.icons.filled.WifiOff
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -55,7 +56,7 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
 
 private val PrimaryBlue  = Color(0xFF1B6CA8)
-private val PrimaryAlpha = Color(0x261B6CA8) // 15 % blue
+private val PrimaryAlpha = Color(0x261B6CA8)
 
 @Composable
 fun SearchingScreen(
@@ -66,12 +67,10 @@ fun SearchingScreen(
 ) {
     var showCancelDialog by remember { mutableStateOf(false) }
 
-    // Start watching once — ViewModel guards against duplicate calls
     LaunchedEffect(Unit) {
         viewModel.startWatching(tripId, onOfferReceived, onTripCancelled)
     }
 
-    // Cancel confirmation dialog
     if (showCancelDialog) {
         AlertDialog(
             onDismissRequest = { showCancelDialog = false },
@@ -102,7 +101,6 @@ fun SearchingScreen(
 
         Spacer(Modifier.height(48.dp))
 
-        // Title
         Text(
             "Mencari Driver",
             style = MaterialTheme.typography.headlineSmall.copy(
@@ -121,7 +119,6 @@ fun SearchingScreen(
 
         Spacer(Modifier.height(40.dp))
 
-        // ── Radar animation ───────────────────────────────────────────────────
         RadarAnimation(modifier = Modifier.size(220.dp))
 
         Spacer(Modifier.height(40.dp))
@@ -160,7 +157,6 @@ fun SearchingScreen(
                             ),
                         )
                         Text(
-                            // Show last 8 chars of tripId so it's readable
                             tripId.takeLast(8).uppercase(),
                             style = MaterialTheme.typography.bodyMedium.copy(
                                 fontWeight = FontWeight.SemiBold,
@@ -196,7 +192,39 @@ fun SearchingScreen(
             }
         }
 
-        // Cancel error
+        // CONN-1: polling error banner — shown after 2+ consecutive poll failures
+        // so the rider knows something is wrong instead of seeing infinite radar.
+        val pollingError = viewModel.pollingError
+        if (pollingError != null) {
+            Spacer(Modifier.height(12.dp))
+            Card(
+                modifier  = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 24.dp),
+                shape     = RoundedCornerShape(12.dp),
+                colors    = CardDefaults.cardColors(containerColor = Color(0xFFFFF3E0)),
+                elevation = CardDefaults.cardElevation(0.dp),
+            ) {
+                Row(
+                    modifier  = Modifier.padding(12.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                ) {
+                    Icon(
+                        Icons.Default.WifiOff, null,
+                        tint     = Color(0xFFF57F17),
+                        modifier = Modifier.size(16.dp),
+                    )
+                    Text(
+                        pollingError,
+                        style = MaterialTheme.typography.bodySmall.copy(
+                            color = Color(0xFFF57F17),
+                        ),
+                    )
+                }
+            }
+        }
+
         if (viewModel.cancelError != null) {
             Spacer(Modifier.height(12.dp))
             Text(
@@ -209,7 +237,6 @@ fun SearchingScreen(
 
         Spacer(Modifier.weight(1f))
 
-        // ── Cancel button ─────────────────────────────────────────────────────
         OutlinedButton(
             onClick  = { showCancelDialog = true },
             enabled  = !viewModel.cancelLoading,
@@ -238,13 +265,11 @@ fun SearchingScreen(
 }
 
 // ── Radar animation ───────────────────────────────────────────────────────────
-// Three rings pulse outward with staggered offsets, fading as they expand.
 
 @Composable
 private fun RadarAnimation(modifier: Modifier = Modifier) {
     val transition = rememberInfiniteTransition(label = "radar")
 
-    // Each ring has a different delay so they stagger evenly across 2.4 s
     val scale1 by transition.animateFloat(
         initialValue   = 0f, targetValue = 1f,
         animationSpec  = infiniteRepeatable(
@@ -274,7 +299,6 @@ private fun RadarAnimation(modifier: Modifier = Modifier) {
             drawRing(scale3)
         }
 
-        // Centre car icon on a solid blue disc
         Surface(
             shape = CircleShape,
             color = PrimaryBlue,
@@ -297,13 +321,11 @@ private fun DrawScope.drawRing(progress: Float) {
     val radius    = maxRadius * progress
     val alpha     = (1f - progress).coerceIn(0f, 1f)
 
-    // Filled translucent disc
     drawCircle(
         color  = Color(0x1A1B6CA8),
         radius = radius,
         alpha  = alpha,
     )
-    // Ring stroke
     drawCircle(
         color  = PrimaryBlue,
         radius = radius,

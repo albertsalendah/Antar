@@ -80,6 +80,17 @@ class TripHistoryViewModel(app: Application) : AndroidViewModel(app) {
     var hasMore    by mutableStateOf(true)
     var error      by mutableStateOf<String?>(null)
 
+    // RATE-DUP: tracks which trip IDs are currently being submitted so the
+    // "Nilai" button switches to a loading indicator immediately on tap and
+    // cannot be tapped again mid-flight.
+    var ratingInFlight by mutableStateOf<Set<String>>(emptySet())
+        private set
+
+    // RATE-DUP: tracks which trip IDs have been rated this session so the
+    // button disappears even before a full refresh resolves.
+    var ratedThisSession by mutableStateOf<Set<String>>(emptySet())
+        private set
+
     private val pageSize = 20
     private var offset   = 0
 
@@ -118,12 +129,30 @@ class TripHistoryViewModel(app: Application) : AndroidViewModel(app) {
                     trips   = page
                     offset  = page.size
                     hasMore = page.size == pageSize
+                    // On refresh, server is the source of truth — clear session cache
+                    ratedThisSession = emptySet()
                 } else {
                     error = "Gagal memuat riwayat"
                 }
             }.onFailure { error = "Tidak dapat terhubung ke server" }
             refreshing = false
         }
+    }
+
+    // RATE-DUP: called by the card's "Nilai" button. Sets the trip into an
+    // in-flight state immediately (button becomes a spinner) then navigates.
+    // The navigation callback is responsible for calling onRatingDone() when
+    // the rating screen finishes to mark the trip as rated in this session.
+    fun markRatingInFlight(tripId: String) {
+        ratingInFlight = ratingInFlight + tripId
+    }
+
+    // RATE-DUP: called when the rating screen returns (success or already-rated).
+    // Removes the in-flight marker and records the trip as rated so the button
+    // stays hidden without needing a full list refresh.
+    fun onRatingDone(tripId: String) {
+        ratingInFlight   = ratingInFlight - tripId
+        ratedThisSession = ratedThisSession + tripId
     }
 }
 
@@ -135,7 +164,9 @@ private val PrimaryBlue = Color(0xFF1B6CA8)
 @Composable
 fun TripHistoryScreen(
     onBack: () -> Unit,
-    onRateTrip: (tripId: String) -> Unit = {},
+    // RATE-DUP: callback receives both tripId and a done-callback so the
+    // ViewModel can be notified when the rating screen finishes.
+    onRateTrip: (tripId: String, onDone: () -> Unit) -> Unit = { _, _ -> },
     viewModel: TripHistoryViewModel = viewModel(),
 ) {
     val listState = rememberLazyListState()
@@ -154,7 +185,6 @@ fun TripHistoryScreen(
 
     Column(modifier = Modifier.fillMaxSize().background(Color(0xFFF4F6F9))) {
 
-        // ── Top bar ───────────────────────────────────────────────────────────
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -180,7 +210,6 @@ fun TripHistoryScreen(
             modifier     = Modifier.weight(1f),
         ) {
             when {
-                // ── Shimmer on first load ─────────────────────────────────────
                 viewModel.loading && viewModel.trips.isEmpty() -> {
                     LazyColumn(
                         modifier        = Modifier.fillMaxSize(),
@@ -191,7 +220,6 @@ fun TripHistoryScreen(
                     }
                 }
 
-                // ── Empty state ───────────────────────────────────────────────
                 !viewModel.loading && viewModel.trips.isEmpty() -> {
                     Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                         Column(horizontalAlignment = Alignment.CenterHorizontally) {
@@ -208,7 +236,6 @@ fun TripHistoryScreen(
                     }
                 }
 
-                // ── List ──────────────────────────────────────────────────────
                 else -> {
                     LazyColumn(
                         state               = listState,
@@ -217,7 +244,17 @@ fun TripHistoryScreen(
                         verticalArrangement = Arrangement.spacedBy(10.dp),
                     ) {
                         items(viewModel.trips, key = { it.id }) { trip ->
-                            TripHistoryCard(trip = trip, onRateTrip = { onRateTrip(trip.id) })
+                            TripHistoryCard(
+                                trip            = trip,
+                                isInFlight      = viewModel.ratingInFlight.contains(trip.id),
+                                ratedThisSession = viewModel.ratedThisSession.contains(trip.id),
+                                onRateTrip      = {
+                                    viewModel.markRatingInFlight(trip.id)
+                                    onRateTrip(trip.id) {
+                                        viewModel.onRatingDone(trip.id)
+                                    }
+                                },
+                            )
                         }
                         item {
                             when {
@@ -258,9 +295,16 @@ fun TripHistoryScreen(
 // ── Trip card ─────────────────────────────────────────────────────────────────
 
 @Composable
-private fun TripHistoryCard(trip: TripResponse, onRateTrip: () -> Unit) {
+private fun TripHistoryCard(
+    trip: TripResponse,
+    isInFlight: Boolean,
+    ratedThisSession: Boolean,
+    onRateTrip: () -> Unit,
+) {
     val isCancelled = trip.status == "cancelled"
-    val canRate     = !isCancelled && !trip.riderHasRated
+    // RATE-DUP: server flag OR session-local flag both suppress the button
+    val alreadyRated = trip.riderHasRated || ratedThisSession
+    val canRate      = !isCancelled && !alreadyRated && !isInFlight
 
     Card(
         modifier  = Modifier.fillMaxWidth(),
@@ -346,26 +390,50 @@ private fun TripHistoryCard(trip: TripResponse, onRateTrip: () -> Unit) {
                     Text(formatDate(trip.createdAt),
                         style = MaterialTheme.typography.labelSmall.copy(color = Color(0xFFAAAAAA)))
                 }
-                if (canRate) {
-                    Button(
-                        onClick  = onRateTrip,
-                        modifier = Modifier.height(34.dp),
-                        shape    = RoundedCornerShape(8.dp),
-                        colors   = ButtonDefaults.buttonColors(
-                            containerColor = Color(0xFFFFF8E1),
-                            contentColor   = Color(0xFFFFA000)),
-                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 0.dp),
-                    ) {
-                        Icon(Icons.Default.Star, null, modifier = Modifier.size(14.dp), tint = Color(0xFFFFA000))
-                        Spacer(Modifier.width(4.dp))
-                        Text("Nilai", fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+
+                when {
+                    // RATE-DUP: in-flight — show spinner so the rider sees
+                    // immediate feedback and cannot tap again.
+                    isInFlight -> {
+                        Box(
+                            modifier = Modifier.size(34.dp),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            CircularProgressIndicator(
+                                modifier    = Modifier.size(20.dp),
+                                strokeWidth = 2.dp,
+                                color       = Color(0xFFFFA000),
+                            )
+                        }
                     }
-                } else if (!isCancelled) {
-                    Row(verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(3.dp)) {
-                        Icon(Icons.Default.Star, null, tint = Color(0xFFFFA000), modifier = Modifier.size(14.dp))
-                        Text("Sudah dinilai",
-                            style = MaterialTheme.typography.labelSmall.copy(color = Color(0xFFAAAAAA)))
+
+                    canRate -> {
+                        Button(
+                            onClick  = onRateTrip,
+                            modifier = Modifier.height(34.dp),
+                            shape    = RoundedCornerShape(8.dp),
+                            colors   = ButtonDefaults.buttonColors(
+                                containerColor = Color(0xFFFFF8E1),
+                                contentColor   = Color(0xFFFFA000)),
+                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 0.dp),
+                        ) {
+                            Icon(Icons.Default.Star, null,
+                                modifier = Modifier.size(14.dp), tint = Color(0xFFFFA000))
+                            Spacer(Modifier.width(4.dp))
+                            Text("Nilai", fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                        }
+                    }
+
+                    // RATE-DUP: already rated (server flag or rated this session)
+                    !isCancelled -> {
+                        Row(verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(3.dp)) {
+                            Icon(Icons.Default.Star, null,
+                                tint = Color(0xFFFFA000), modifier = Modifier.size(14.dp))
+                            Text("Sudah dinilai",
+                                style = MaterialTheme.typography.labelSmall.copy(
+                                    color = Color(0xFFAAAAAA)))
+                        }
                     }
                 }
             }
@@ -377,7 +445,7 @@ private fun formatRupiah(amount: Double) =
     "Rp " + NumberFormat.getNumberInstance(Locale("id", "ID")).format(amount.toLong())
 
 private fun formatDate(iso: String): String = runCatching {
-    val parser = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss", Locale.getDefault()).apply {
+    val parser = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss", Locale.US).apply {
         timeZone = TimeZone.getTimeZone("Asia/Makassar")
     }
     SimpleDateFormat("d MMM yyyy, HH:mm", Locale("id", "ID")).format(parser.parse(iso)!!)

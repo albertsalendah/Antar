@@ -24,6 +24,11 @@ fun AntarNavGraph(
     startDestination: String,
 ) {
     // ── FCM deep link observer ────────────────────────────────────────────────
+    // DEEP-1: DeepLinkHandler uses extraBufferCapacity = 1. If two FCM
+    // notifications arrive while the app is killed, only the last event
+    // survives. This is acceptable for the current Talaud use-case where
+    // simultaneous competing offers are unlikely, but would need a larger
+    // buffer or persistent queue for higher-volume deployments.
     LaunchedEffect(navController) {
         DeepLinkHandler.events.collect { event ->
             when (event) {
@@ -66,8 +71,6 @@ fun AntarNavGraph(
         // ── Main ──────────────────────────────────────────────────────────────
         composable(Screen.Home.route) {
             HomeScreen(
-                // Booking now happens entirely within HomeScreen's bottom sheet.
-                // onStartSearching is called after the ride is successfully placed.
                 onStartSearching  = { tripId ->
                     navController.navigate(Screen.Searching.route(tripId)) {
                         popUpTo(Screen.Home.route)
@@ -77,23 +80,51 @@ fun AntarNavGraph(
                 onOpenProfile     = { navController.navigate(Screen.Profile.route) },
                 onActiveTripFound = { tripId, status ->
                     val dest = when (status) {
-                        "requested"             -> Screen.Searching.route(tripId)
-                        "offered"               -> Screen.Negotiation.route(tripId)
+                        "requested"                        -> Screen.Searching.route(tripId)
+                        "offered"                          -> Screen.Negotiation.route(tripId)
                         "agreed", "arrived", "in_progress" -> Screen.ActiveTrip.route(tripId)
-                        else                    -> null
+                        else                               -> null
                     }
                     dest?.let { navController.navigate(it) { popUpTo(Screen.Home.route) } }
                 },
             )
         }
+
         composable(Screen.History.route) {
+            // RATE-DUP: onRateTrip now receives (tripId, onDone). We navigate
+            // to RateDriver and call onDone() when that screen finishes so the
+            // ViewModel can clear the in-flight state and mark the trip as rated
+            // without requiring a full list refresh.
             TripHistoryScreen(
                 onBack     = { navController.popBackStack() },
-                onRateTrip = { tripId ->
-                    navController.navigate(Screen.RateDriver.route(tripId, fromHistory = true))
+                onRateTrip = { tripId, onDone ->
+                    navController.navigate(
+                        Screen.RateDriver.route(tripId, fromHistory = true)
+                    )
+                    // Store the done callback so RateDriver can invoke it.
+                    // We use the back-stack saved state handle as a lightweight
+                    // one-shot communication channel between destinations.
+                    navController.currentBackStackEntry
+                        ?.savedStateHandle
+                        ?.set("rate_done_callback_$tripId", true)
+                    // Observe when RateDriver pops and call onDone.
+                    // The back-stack entry for History is the previous entry
+                    // after RateDriver is on top — we watch for its return.
+                    navController.getBackStackEntry(Screen.History.route)
+                        .savedStateHandle
+                        .getLiveData<Boolean>("rated_$tripId")
+                        .observeForever { rated ->
+                            if (rated == true) {
+                                onDone()
+                                navController.getBackStackEntry(Screen.History.route)
+                                    .savedStateHandle
+                                    .remove<Boolean>("rated_$tripId")
+                            }
+                        }
                 },
             )
         }
+
         composable(Screen.Profile.route) {
             ProfileScreen(
                 onBack   = { navController.popBackStack() },
@@ -125,6 +156,7 @@ fun AntarNavGraph(
                 },
             )
         }
+
         composable(
             route     = Screen.Negotiation.route,
             arguments = listOf(navArgument("tripId") { type = NavType.StringType }),
@@ -144,6 +176,7 @@ fun AntarNavGraph(
                 },
             )
         }
+
         composable(
             route     = Screen.ActiveTrip.route,
             arguments = listOf(navArgument("tripId") { type = NavType.StringType }),
@@ -158,6 +191,7 @@ fun AntarNavGraph(
                 },
             )
         }
+
         composable(
             route     = Screen.TripComplete.route,
             arguments = listOf(navArgument("tripId") { type = NavType.StringType }),
@@ -173,6 +207,7 @@ fun AntarNavGraph(
                 },
             )
         }
+
         composable(
             route     = Screen.RateDriver.route,
             arguments = listOf(
@@ -180,13 +215,23 @@ fun AntarNavGraph(
                 navArgument("fromHistory") { type = NavType.BoolType; defaultValue = false },
             ),
         ) { back ->
-            val tripId      = back.arguments?.getString("tripId")      ?: return@composable
+            val tripId      = back.arguments?.getString("tripId")       ?: return@composable
             val fromHistory = back.arguments?.getBoolean("fromHistory") ?: false
             RateDriverScreen(
                 tripId = tripId,
                 onDone = {
-                    if (fromHistory) navController.popBackStack()
-                    else navController.navigate(Screen.Home.route) { popUpTo(0) { inclusive = true } }
+                    if (fromHistory) {
+                        // RATE-DUP: signal the History back-stack entry that
+                        // this trip has been rated before popping back.
+                        navController.previousBackStackEntry
+                            ?.savedStateHandle
+                            ?.set("rated_$tripId", true)
+                        navController.popBackStack()
+                    } else {
+                        navController.navigate(Screen.Home.route) {
+                            popUpTo(0) { inclusive = true }
+                        }
+                    }
                 },
             )
         }

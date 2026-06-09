@@ -73,7 +73,7 @@ fun RegisterScreen(
         AlertDialog(
             onDismissRequest = {},
             title = { Text("Konfirmasi Email") },
-            text = {
+            text  = {
                 Text(
                     "Akun berhasil dibuat! Silakan cek email Anda dan klik link " +
                             "konfirmasi sebelum masuk."
@@ -138,14 +138,9 @@ fun RegisterScreen(
             // Full name
             OutlinedTextField(
                 value = viewModel.regFullName,
-                onValueChange = {
-                    viewModel.regFullName = it
-                    viewModel.regError = null
-                },
+                onValueChange = { viewModel.regFullName = it; viewModel.regError = null },
                 label = { Text("Nama Lengkap") },
-                leadingIcon = {
-                    Icon(Icons.Default.Person, contentDescription = null, tint = PrimaryBlue)
-                },
+                leadingIcon = { Icon(Icons.Default.Person, null, tint = PrimaryBlue) },
                 singleLine = true,
                 keyboardOptions = KeyboardOptions(
                     capitalization = KeyboardCapitalization.Words,
@@ -158,19 +153,14 @@ fun RegisterScreen(
                 shape = RoundedCornerShape(12.dp),
             )
 
-            Spacer(modifier = Modifier.height(12.dp))
+            Spacer(Modifier.height(12.dp))
 
             // Email
             OutlinedTextField(
                 value = viewModel.regEmail,
-                onValueChange = {
-                    viewModel.regEmail = it
-                    viewModel.regError = null
-                },
+                onValueChange = { viewModel.regEmail = it; viewModel.regError = null },
                 label = { Text("Email") },
-                leadingIcon = {
-                    Icon(Icons.Default.Email, contentDescription = null, tint = PrimaryBlue)
-                },
+                leadingIcon = { Icon(Icons.Default.Email, null, tint = PrimaryBlue) },
                 singleLine = true,
                 keyboardOptions = KeyboardOptions(
                     keyboardType = KeyboardType.Email,
@@ -183,19 +173,14 @@ fun RegisterScreen(
                 shape = RoundedCornerShape(12.dp),
             )
 
-            Spacer(modifier = Modifier.height(12.dp))
+            Spacer(Modifier.height(12.dp))
 
             // Password
             OutlinedTextField(
                 value = viewModel.regPassword,
-                onValueChange = {
-                    viewModel.regPassword = it
-                    viewModel.regError = null
-                },
+                onValueChange = { viewModel.regPassword = it; viewModel.regError = null },
                 label = { Text("Password") },
-                leadingIcon = {
-                    Icon(Icons.Default.Lock, contentDescription = null, tint = PrimaryBlue)
-                },
+                leadingIcon = { Icon(Icons.Default.Lock, null, tint = PrimaryBlue) },
                 trailingIcon = {
                     IconButton(onClick = { passwordVisible = !passwordVisible }) {
                         Icon(
@@ -227,21 +212,16 @@ fun RegisterScreen(
                 shape = RoundedCornerShape(12.dp),
             )
 
-            Spacer(modifier = Modifier.height(12.dp))
+            Spacer(Modifier.height(12.dp))
 
             // Confirm password
             val passwordMismatch = viewModel.regConfirmPassword.isNotEmpty() &&
                     viewModel.regPassword != viewModel.regConfirmPassword
             OutlinedTextField(
                 value = viewModel.regConfirmPassword,
-                onValueChange = {
-                    viewModel.regConfirmPassword = it
-                    viewModel.regError = null
-                },
+                onValueChange = { viewModel.regConfirmPassword = it; viewModel.regError = null },
                 label = { Text("Konfirmasi Password") },
-                leadingIcon = {
-                    Icon(Icons.Default.Lock, contentDescription = null, tint = PrimaryBlue)
-                },
+                leadingIcon = { Icon(Icons.Default.Lock, null, tint = PrimaryBlue) },
                 trailingIcon = {
                     IconButton(onClick = { confirmPasswordVisible = !confirmPasswordVisible }) {
                         Icon(
@@ -270,19 +250,14 @@ fun RegisterScreen(
                 shape = RoundedCornerShape(12.dp),
             )
 
-            Spacer(modifier = Modifier.height(12.dp))
+            Spacer(Modifier.height(12.dp))
 
-            // Phone number
+            // Phone number — VALID-1: hint text shows expected format
             OutlinedTextField(
                 value = viewModel.regPhone,
-                onValueChange = {
-                    viewModel.regPhone = it
-                    viewModel.regError = null
-                },
+                onValueChange = { viewModel.regPhone = it; viewModel.regError = null },
                 label = { Text("Nomor Telepon") },
-                leadingIcon = {
-                    Icon(Icons.Default.Phone, contentDescription = null, tint = PrimaryBlue)
-                },
+                leadingIcon = { Icon(Icons.Default.Phone, null, tint = PrimaryBlue) },
                 singleLine = true,
                 keyboardOptions = KeyboardOptions(
                     keyboardType = KeyboardType.Phone,
@@ -294,13 +269,22 @@ fun RegisterScreen(
                         viewModel.register(onRegisterSuccess)
                     },
                 ),
+                // VALID-1: hint shows the two accepted formats so riders know
+                // exactly what to enter before they hit the register button.
+                supportingText = {
+                    Text(
+                        "Contoh: 08123456789 atau +6281234567890",
+                        color = Color(0xFFAAAAAA),
+                        style = MaterialTheme.typography.labelSmall,
+                    )
+                },
                 modifier = Modifier.fillMaxWidth(),
                 shape = RoundedCornerShape(12.dp),
             )
 
             // Inline error from ViewModel
             if (viewModel.regError != null) {
-                Spacer(modifier = Modifier.height(8.dp))
+                Spacer(Modifier.height(8.dp))
                 Text(
                     text = viewModel.regError!!,
                     color = MaterialTheme.colorScheme.error,
@@ -309,7 +293,7 @@ fun RegisterScreen(
                 )
             }
 
-            Spacer(modifier = Modifier.height(32.dp))
+            Spacer(Modifier.height(32.dp))
 
             // Register button
             Button(
@@ -318,9 +302,7 @@ fun RegisterScreen(
                     viewModel.register(onRegisterSuccess)
                 },
                 enabled = !viewModel.regLoading,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(52.dp),
+                modifier = Modifier.fillMaxWidth().height(52.dp),
                 shape = RoundedCornerShape(12.dp),
                 colors = ButtonDefaults.buttonColors(containerColor = PrimaryBlue),
             ) {
@@ -331,17 +313,12 @@ fun RegisterScreen(
                         strokeWidth = 2.5.dp,
                     )
                 } else {
-                    Text(
-                        text = "Daftar",
-                        fontSize = 16.sp,
-                        fontWeight = FontWeight.SemiBold,
-                    )
+                    Text(text = "Daftar", fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
                 }
             }
 
-            Spacer(modifier = Modifier.height(20.dp))
+            Spacer(Modifier.height(20.dp))
 
-            // Login link
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.Center,

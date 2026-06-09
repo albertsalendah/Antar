@@ -61,14 +61,14 @@ class AuthViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     // ── Register state ────────────────────────────────────────────────────────
-    var regFullName       by mutableStateOf("")
-    var regEmail          by mutableStateOf("")
-    var regPassword       by mutableStateOf("")
+    var regFullName        by mutableStateOf("")
+    var regEmail           by mutableStateOf("")
+    var regPassword        by mutableStateOf("")
     var regConfirmPassword by mutableStateOf("")
-    var regPhone          by mutableStateOf("")
-    var regLoading        by mutableStateOf(false)
-    var regError          by mutableStateOf<String?>(null)
-    var regNeedsEmail     by mutableStateOf(false)
+    var regPhone           by mutableStateOf("")
+    var regLoading         by mutableStateOf(false)
+    var regError           by mutableStateOf<String?>(null)
+    var regNeedsEmail      by mutableStateOf(false)
 
     fun register(onSuccess: () -> Unit) {
         when {
@@ -76,10 +76,17 @@ class AuthViewModel(app: Application) : AndroidViewModel(app) {
                     regPassword.isBlank() || regConfirmPassword.isBlank() ||
                     regPhone.isBlank() ->
                 regError = "Semua kolom harus diisi"
+
             regPassword.length < 8 ->
                 regError = "Password minimal 8 karakter"
+
             regPassword != regConfirmPassword ->
                 regError = "Password dan konfirmasi password tidak cocok"
+
+            // VALID-1: phone must start with 08 or +62
+            !isValidPhoneNumber(regPhone.trim()) ->
+                regError = "Nomor telepon harus diawali 08 atau +62"
+
             else -> viewModelScope.launch {
                 regLoading = true
                 regError   = null
@@ -112,6 +119,16 @@ class AuthViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────
+
+    /**
+     * VALID-1: Indonesian phone numbers must start with 08 (local format)
+     * or +62 (international format). Both are common in Indonesia.
+     * Minimum 9 digits after the prefix to avoid accepting truncated numbers.
+     */
+    private fun isValidPhoneNumber(phone: String): Boolean {
+        return (phone.startsWith("08") || phone.startsWith("+62")) &&
+                phone.filter { it.isDigit() }.length >= 9
+    }
 
     private suspend fun registerFcmToken() {
         runCatching {

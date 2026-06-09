@@ -33,32 +33,29 @@ class NegotiationViewModel(app: Application) : AndroidViewModel(app) {
 
     var trip          by mutableStateOf<TripResponse?>(null)
     var loading       by mutableStateOf(false)
-    var actionLoading by mutableStateOf(false)
     var error         by mutableStateOf<String?>(null)
+
+    // CONN-2: single actionLoading flag guards accept / reject / submitCounter
+    // against double-tap on slow connections. Mirrors the pattern in OfferPriceViewModel.
+    var actionLoading by mutableStateOf(false)
 
     var showCounter      by mutableStateOf(false)
     var counterExhausted by mutableStateOf(false)
 
-    /**
-     * Current fare value in the stepper.
-     * Initialised to the driver's offered fare when the counter panel opens
-     * so the rider starts from the current offer as a reference point.
-     * The server enforces the hard floor (default_fare); we don't block
-     * the stepper at a floor here since we don't have that value client-side.
-     */
+    // NEG-REJECT: state to drive the confirm-before-reject dialog in the screen.
+    var showRejectDialog by mutableStateOf(false)
+
     var counterFare by mutableStateOf(0.0)
         private set
 
     private var channel: RealtimeChannel? = null
     private var pollJob: Job?             = null
 
-    // Internal — exposed so NegotiationScreen can guard against duplicate start
     var started = false
 
     // ── Stepper helpers ───────────────────────────────────────────────────────
 
     fun openCounter() {
-        // Pre-fill stepper with driver's offered fare as a sensible starting point
         counterFare = trip?.offeredFare ?: 0.0
         showCounter = true
     }
@@ -71,6 +68,7 @@ class NegotiationViewModel(app: Application) : AndroidViewModel(app) {
         val next = counterFare - STEP
         if (next > 0) counterFare = next
     }
+
     @JvmName("updateCounterFare")
     fun setCounterFare(value: Double) {
         counterFare = value
@@ -170,7 +168,11 @@ class NegotiationViewModel(app: Application) : AndroidViewModel(app) {
 
     // ── Actions ───────────────────────────────────────────────────────────────
 
+    // CONN-2: each action checks actionLoading before proceeding and sets it
+    // for the duration of the network call, preventing double-taps.
+
     fun accept(tripId: String, onAgreed: () -> Unit) {
+        if (actionLoading) return
         viewModelScope.launch {
             actionLoading = true
             error         = null
@@ -183,7 +185,10 @@ class NegotiationViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    // NEG-REJECT: actual rejection — only called after confirm dialog is confirmed.
     fun reject(tripId: String, onReset: () -> Unit) {
+        if (actionLoading) return
+        showRejectDialog = false
         viewModelScope.launch {
             actionLoading = true
             error         = null
@@ -196,13 +201,9 @@ class NegotiationViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    /**
-     * Submit the counter using [counterFare] from the stepper.
-     * Server enforces the fare floor — if below it returns an error which
-     * we surface directly to the rider.
-     */
     fun submitCounter(tripId: String) {
         if (counterFare <= 0) { error = "Masukkan nominal yang valid"; return }
+        if (actionLoading) return
         viewModelScope.launch {
             actionLoading = true
             error         = null

@@ -189,11 +189,6 @@ class HomeViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    /**
-     * Forward geocode: address string → lat/lng pair.
-     * Returns null if Nominatim finds nothing or the network call fails.
-     * Used by requestRide() as a pickup coord fallback and by map dropoff input.
-     */
     private suspend fun geocode(address: String): Pair<Double, Double>? =
         withContext(Dispatchers.IO) {
             runCatching {
@@ -234,16 +229,18 @@ class HomeViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     // ── Booking ───────────────────────────────────────────────────────────────
+    // REQ-DUP fix: bookingLoading is set to true BEFORE the coroutine is
+    // launched so a second tap between launch and first suspension cannot
+    // sneak through and fire a duplicate request.
     fun requestRide(onSuccess: (tripId: String) -> Unit, onError: (String) -> Unit) {
+        if (bookingLoading) return          // guard against concurrent calls
         val type = selectedType ?: return
+        bookingLoading = true               // set BEFORE launch, not inside it
+        bookingError   = null
         viewModelScope.launch {
-            bookingLoading = true
-            bookingError   = null
             runCatching {
 
-                // ── Fix B: geocode pickup if map tap hasn't set coords yet ────
-                // This happens when the rider typed an address but didn't tap the
-                // map, so pickupLat/pickupLng are still 0.0 from the text field.
+                // ── Geocode pickup if map tap hasn't set coords yet ────────────
                 if (pickupLat == 0.0 || pickupLng == 0.0) {
                     if (pickupAddress.isBlank()) {
                         onError("Masukkan alamat atau pilih lokasi penjemputan di peta")

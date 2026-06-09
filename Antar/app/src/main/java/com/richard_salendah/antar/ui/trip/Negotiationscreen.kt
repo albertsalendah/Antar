@@ -25,6 +25,7 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.LocationOn
 import androidx.compose.material.icons.filled.Payments
 import androidx.compose.material.icons.filled.SwapVert
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
@@ -74,6 +75,24 @@ fun NegotiationScreen(
     val haptic = rememberHaptic()
 
     LaunchedEffect(Unit) { viewModel.start(tripId, onOfferAccepted, onTripReset) }
+
+    // NEG-REJECT: confirm dialog before rejecting — mirrors SearchingScreen cancel pattern.
+    if (viewModel.showRejectDialog) {
+        AlertDialog(
+            onDismissRequest = { viewModel.showRejectDialog = false },
+            title = { Text("Tolak Penawaran?") },
+            text  = { Text("Penawaran akan ditolak dan driver perlu menawar ulang. Yakin ingin menolak?") },
+            confirmButton = {
+                Button(
+                    onClick = { viewModel.reject(tripId, onTripReset) },
+                    colors  = ButtonDefaults.buttonColors(containerColor = Red),
+                ) { Text("Ya, Tolak") }
+            },
+            dismissButton = {
+                TextButton(onClick = { viewModel.showRejectDialog = false }) { Text("Batal") }
+            },
+        )
+    }
 
     val trip = viewModel.trip
 
@@ -222,9 +241,6 @@ fun NegotiationScreen(
 
                             Spacer(Modifier.height(16.dp))
 
-                            // ── +/- Stepper row ───────────────────────────────
-                            // rawInput keeps the text field value in sync with
-                            // both typed edits and button taps
                             var rawInput by remember {
                                 mutableStateOf(viewModel.counterFare.roundToInt().toString())
                             }
@@ -314,13 +330,12 @@ fun NegotiationScreen(
                                 modifier = Modifier.fillMaxWidth(),
                             ) {
                                 OutlinedButton(
-                                    onClick  = {
-                                        viewModel.showCounter = false
-                                    },
+                                    onClick  = { viewModel.showCounter = false },
                                     modifier = Modifier.weight(1f),
                                     shape    = RoundedCornerShape(10.dp),
                                 ) { Text("Batal") }
 
+                                // CONN-2: disabled while any action is in flight
                                 Button(
                                     onClick = {
                                         haptic.perform(HapticType.Tick)
@@ -383,6 +398,7 @@ fun NegotiationScreen(
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 if (isRiderTurn && !viewModel.showCounter) {
+                    // CONN-2: accept is disabled while any action is in flight
                     Button(
                         onClick = {
                             haptic.perform(HapticType.Confirm)
@@ -420,6 +436,7 @@ fun NegotiationScreen(
                                     haptic.perform(HapticType.Tick)
                                     viewModel.openCounter()
                                 },
+                                enabled  = !viewModel.actionLoading,
                                 modifier = Modifier.weight(1f).height(48.dp),
                                 shape    = RoundedCornerShape(12.dp),
                                 colors   = ButtonDefaults.outlinedButtonColors(
@@ -442,10 +459,12 @@ fun NegotiationScreen(
                             )
                         }
 
+                        // NEG-REJECT: tap opens confirm dialog instead of rejecting immediately.
+                        // CONN-2: disabled while any action is in flight.
                         OutlinedButton(
                             onClick = {
                                 haptic.perform(HapticType.Tick)
-                                viewModel.reject(tripId, onTripReset)
+                                viewModel.showRejectDialog = true
                             },
                             enabled  = !viewModel.actionLoading,
                             modifier = Modifier.weight(1f).height(48.dp),
@@ -463,7 +482,11 @@ fun NegotiationScreen(
                     }
                 } else if (!isRiderTurn) {
                     TextButton(
-                        onClick  = { viewModel.reject(tripId, onTripReset) },
+                        onClick  = {
+                            // When it's the driver's turn (rider waiting), "cancel" maps to
+                            // reject which resets back to requested.
+                            viewModel.showRejectDialog = true
+                        },
                         modifier = Modifier.fillMaxWidth(),
                     ) {
                         Text(

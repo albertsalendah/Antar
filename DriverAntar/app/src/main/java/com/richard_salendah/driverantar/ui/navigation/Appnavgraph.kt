@@ -162,22 +162,12 @@ fun AppNavGraph(
                 navController  = navController,
                 onBack         = { navController.popBackStack() },
                 onTripSelected = { trip ->
-                    composable(Screen.IncomingTrips.route) {
-                        val vm = remember { IncomingTripsViewModel(repository) }
-                        IncomingTripsScreen(
-                            viewModel      = vm,
-                            navController  = navController,
-                            onBack         = { navController.popBackStack() },
-                            onTripSelected = { trip ->
-                                if (!LocationService.isRunning) {
-                                    vm.showSnack("Aktifkan mode online terlebih dahulu")
-                                } else {
-                                    TripSelectionHolder.selectedTrip = trip
-                                    navController.navigate(
-                                        Screen.OfferPrice.route(trip.id, trip.default_fare, trip.trip_type)
-                                    )
-                                }
-                            }
+                    if (!LocationService.isRunning) {
+                        vm.showSnack("Aktifkan mode online terlebih dahulu")
+                    } else {
+                        TripSelectionHolder.selectedTrip = trip
+                        navController.navigate(
+                            Screen.OfferPrice.route(trip.id, trip.default_fare, trip.trip_type)
                         )
                     }
                 }
