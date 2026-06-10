@@ -3,19 +3,60 @@ package com.richard_salendah.antar.ui.trip
 import android.util.Log
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import okhttp3.OkHttpClient
+import okhttp3.Request
 import org.json.JSONObject
 import org.osmdroid.util.GeoPoint
-import java.net.HttpURLConnection
-import java.net.URL
+import java.util.concurrent.TimeUnit
 import kotlin.math.atan2
 import kotlin.math.cos
 import kotlin.math.pow
 import kotlin.math.sin
 import kotlin.math.sqrt
+import java.security.KeyStore
+import javax.net.ssl.SSLContext
+import javax.net.ssl.TrustManagerFactory
+import javax.net.ssl.X509TrustManager
+import okhttp3.ConnectionSpec
 
 private const val TAG = "OsrmRouteHelper"
 
 object OsrmRouteHelper {
+
+    /**
+     * Shared OkHttpClient — reused across all route requests so connections
+     * are pooled. OkHttp handles TLS negotiation correctly with router.project-osrm.org
+     * where HttpURLConnection fails with "Handshake failed" due to cipher suite
+     * incompatibilities in Android's built-in Java TLS stack.
+     */
+    private val httpClient: OkHttpClient by lazy {
+        try {
+            val tmf = TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm()).apply {
+                init(null as KeyStore?)
+            }
+            val trustManager = tmf.trustManagers.filterIsInstance<X509TrustManager>().first()
+
+            // FIX: Use "TLS" instead of "TLSv1.3". This works on all Android versions
+            // and prevents the NoSuchAlgorithmException.
+            val sslContext = SSLContext.getInstance("TLS").apply {
+                init(null, arrayOf(trustManager), null)
+            }
+
+            OkHttpClient.Builder()
+                .sslSocketFactory(sslContext.socketFactory, trustManager)
+                // Re-adding ConnectionSpecs just in case OSRM is being strict about Modern TLS
+                .connectionSpecs(listOf(ConnectionSpec.MODERN_TLS, ConnectionSpec.COMPATIBLE_TLS, ConnectionSpec.CLEARTEXT))
+                .connectTimeout(10, TimeUnit.SECONDS)
+                .readTimeout(10, TimeUnit.SECONDS)
+                .build()
+        } catch (e: Exception) {
+            Log.e(TAG, "Custom SSLContext initialization failed, falling back to default OkHttp", e)
+            OkHttpClient.Builder()
+                .connectTimeout(10, TimeUnit.SECONDS)
+                .readTimeout(10, TimeUnit.SECONDS)
+                .build()
+        }
+    }
 
     /**
      * Fetches a road-following route between two coordinates using the public
@@ -41,12 +82,19 @@ object OsrmRouteHelper {
 
             Log.d(TAG, "Fetching OSRM route: ($originLat,$originLng) → ($destLat,$destLng)")
 
-            val conn = URL(url).openConnection() as HttpURLConnection
-            conn.setRequestProperty("User-Agent", "AntarRiderApp/1.0")
-            conn.connectTimeout = 6_000
-            conn.readTimeout    = 6_000
+            val request = Request.Builder()
+                .url(url)
+                .header("User-Agent", "AntarRiderApp/1.0")
+                .build()
 
-            val body   = conn.inputStream.bufferedReader().readText()
+            val body = httpClient.newCall(request).execute().use { response ->
+                if (!response.isSuccessful) {
+                    Log.w(TAG, "OSRM returned HTTP ${response.code} — no road data")
+                    return@runCatching null
+                }
+                response.body?.string() ?: return@runCatching null
+            }
+
             val json   = JSONObject(body)
             val routes = json.getJSONArray("routes")
 
@@ -75,10 +123,10 @@ object OsrmRouteHelper {
     }
 
     /**
-     * TODO-7: Fetches road route from OSRM, falls back to a 2-point straight line
+     * Fetches road route from OSRM, falls back to a 2-point straight line
      * when OSRM returns null (no road data) or throws (network error).
      *
-     * Talaud islands have sparse OSM road data so OSRM frequently returns 0 routes.
+     * Talaud islands have sparse OSM road data so OSRM may return 0 routes.
      * The straight line is visually imperfect but far better than showing nothing.
      * Both driver and rider apps should use this instead of [fetchRoute] directly.
      */
@@ -96,7 +144,6 @@ object OsrmRouteHelper {
         }
 
         // Fallback: straight line between origin and destination.
-        // Logged clearly so we can confirm this is the path being used in Talaud.
         Log.w(TAG, "OSRM unavailable — drawing straight-line fallback " +
                 "($originLat,$originLng) → ($destLat,$destLng)")
         return listOf(

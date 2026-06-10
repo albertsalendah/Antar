@@ -17,13 +17,16 @@ import com.richard_salendah.antar.service.RiderFirebaseMessagingService.Companio
 import com.richard_salendah.antar.service.RiderFirebaseMessagingService.Companion.EXTRA_FCM_TYPE
 import com.richard_salendah.antar.ui.theme.AntarTheme
 import kotlinx.coroutines.launch
+import org.conscrypt.Conscrypt
+import java.security.Security
+
 
 class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
-
+        Security.insertProviderAt(Conscrypt.newProvider(), 1)
         // Route FCM tap that cold-started the app
         handleFcmIntent(intent)
 

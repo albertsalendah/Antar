@@ -123,4 +123,6 @@ dependencies {
 
     implementation("androidx.security:security-crypto:1.1.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.10.2")
+
+    implementation("org.conscrypt:conscrypt-android:2.5.2")
 }

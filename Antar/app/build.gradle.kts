@@ -114,6 +114,8 @@ dependencies {
     implementation(platform("com.google.firebase:firebase-bom:34.13.0"))
     implementation("com.google.firebase:firebase-messaging")
 
+    implementation("org.conscrypt:conscrypt-android:2.5.2")
+
     // ── Test ──────────────────────────────────────────────────────────────────
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)
