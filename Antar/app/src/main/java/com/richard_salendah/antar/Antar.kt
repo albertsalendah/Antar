@@ -11,6 +11,8 @@ import com.richard_salendah.antar.data.remote.ApiService
 import io.github.jan.supabase.SupabaseClient
 import io.github.jan.supabase.createSupabaseClient
 import io.github.jan.supabase.realtime.Realtime
+import org.conscrypt.Conscrypt
+import java.security.Security
 
 class Antar : Application() {
 
@@ -25,7 +27,7 @@ class Antar : Application() {
 
     override fun onCreate() {
         super.onCreate()
-
+        Security.insertProviderAt(Conscrypt.newProvider(), 1)
         sessionManager = SessionManager(applicationContext)
         apiService      = ApiClient.build(sessionManager)
         supabase        = createSupabaseClient(

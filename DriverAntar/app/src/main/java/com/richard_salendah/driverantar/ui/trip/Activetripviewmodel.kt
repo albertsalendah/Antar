@@ -52,6 +52,16 @@ class ActiveTripViewModel(
     // ── Current driver GeoPoint for map marker ────────────────────────────────
     var currentGeoPoint by mutableStateOf(GeoPoint(0.0, 0.0)); private set
 
+    // Destination the current routePoints correspond to — invalidates the
+    // cached route when the leg changes (pickup → dropoff) so a stale route
+    // is never shown anchored to the wrong destination.
+    private var cachedDestLat = 0.0
+    private var cachedDestLng = 0.0
+
+    // Timestamp of the last OSRM failure — avoids retrying OSRM every 50m
+    // while it's down. Reset on success or on leg transition.
+    private var lastOsrmFailureMs = 0L
+
     /**
      * Whether the complete button should be enabled.
      * For transport trips: driver must be within 150 m of dropoff.
@@ -88,6 +98,10 @@ class ActiveTripViewModel(
                 .onSuccess { t ->
                     trip    = t
                     uiState = ActiveTripUiState.Idle
+                    val loc = currentGeoPoint
+                    if (loc.latitude != 0.0 || loc.longitude != 0.0) {
+                        fetchRouteIfNeeded(loc.latitude, loc.longitude)
+                    }
                 }
                 .onFailure { e ->
                     uiState = ActiveTripUiState.Error(e.message ?: "Failed to load trip")
@@ -176,7 +190,7 @@ class ActiveTripViewModel(
         )
         if (moved < 50.0 && routePoints.isNotEmpty()) return
 
-        val (destLat, destLng) = when (t.status) {
+        val (rawDestLat, rawDestLng) = when (t.status) {
             "agreed"      -> Pair(t.pickup_lat, t.pickup_lng)
             "in_progress" -> if (t.dropoff_lat != 0.0)
                 Pair(t.dropoff_lat, t.dropoff_lng)
@@ -184,14 +198,45 @@ class ActiveTripViewModel(
                 Pair(t.pickup_lat, t.pickup_lng)
             else          -> return
         }
+        val destLat = rawDestLat ?: 0.0
+        val destLng = rawDestLng ?: 0.0
         if (destLat == 0.0 && destLng == 0.0) return
 
         lastRouteFetchLat = driverLat
         lastRouteFetchLng = driverLng
 
         viewModelScope.launch {
-            val pts = RouteHelper.fetchRoute(driverLat, driverLng, destLat ?: 0.0, destLng ?: 0.0)
-            if (pts != null) routePoints = pts
+            val now = System.currentTimeMillis()
+            val cooldownActive = now - lastOsrmFailureMs < OSRM_COOLDOWN_MS
+
+            val fresh = if (cooldownActive) null
+            else RouteHelper.fetchRoute(driverLat, driverLng, destLat, destLng)
+
+            when {
+                fresh != null -> {
+                    // OSRM succeeded — update cache, clear cooldown
+                    routePoints       = fresh
+                    cachedDestLat     = destLat
+                    cachedDestLng     = destLng
+                    lastOsrmFailureMs = 0L
+                }
+                routePoints.isNotEmpty() &&
+                        cachedDestLat == destLat && cachedDestLng == destLng -> {
+                    // OSRM unavailable — keep showing the stale road route,
+                    // still anchored to the correct destination for this leg
+                    if (!cooldownActive) lastOsrmFailureMs = now
+                }
+                else -> {
+                    // No usable cache for this destination — straight line,
+                    // last resort
+                    routePoints   = listOf(
+                        GeoPoint(driverLat, driverLng), GeoPoint(destLat, destLng)
+                    )
+                    cachedDestLat = destLat
+                    cachedDestLng = destLng
+                    if (!cooldownActive) lastOsrmFailureMs = now
+                }
+            }
         }
     }
 
@@ -220,6 +265,9 @@ class ActiveTripViewModel(
                     routePoints       = emptyList()
                     lastRouteFetchLat = 0.0
                     lastRouteFetchLng = 0.0
+                    cachedDestLat     = 0.0
+                    cachedDestLng     = 0.0
+                    lastOsrmFailureMs = 0L
                 }
                 .onFailure { e ->
                     uiState = ActiveTripUiState.Error(
@@ -279,5 +327,6 @@ class ActiveTripViewModel(
 
     companion object {
         private const val TAG = "ActiveTripVM"
+        private const val OSRM_COOLDOWN_MS = 5 * 60_000L
     }
 }

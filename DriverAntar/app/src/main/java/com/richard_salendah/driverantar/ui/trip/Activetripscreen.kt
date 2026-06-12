@@ -652,7 +652,7 @@ private fun updateOverlays(
                 position = GeoPoint(t.pickup_lat, t.pickup_lng)
                 title    = "Jemput: ${t.rider_name}"
                 snippet  = t.pickup_address
-                icon     = circleDrawable(map.context, 0xFF1B6CA8.toInt(), 30)
+                icon     = pinDrawable(map.context, 0xFF1B6CA8.toInt(), 30)
                 setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_BOTTOM)
                 map.overlays.add(this)
             }
@@ -662,7 +662,7 @@ private fun updateOverlays(
                 position = GeoPoint(t.dropoff_lat ?: 0.0, t.dropoff_lng ?: 0.0)
                 title    = "Tujuan"
                 snippet  = t.dropoff_address ?: ""
-                icon     = circleDrawable(map.context, 0xFFE53935.toInt(), 30)
+                icon     = pinDrawable(map.context, 0xFFE53935.toInt(), 30)
                 setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_BOTTOM)
                 map.overlays.add(this)
             }
@@ -698,6 +698,45 @@ private fun circleDrawable(
             style       = Paint.Style.STROKE
             strokeWidth = px * 0.18f
         })
+    return android.graphics.drawable.BitmapDrawable(context.resources, bmp)
+}
+
+/**
+ * Teardrop map-pin marker for static locations (pickup, dropoff).
+ * Anchored bottom-center (the tip) — pairs with ANCHOR_CENTER/ANCHOR_BOTTOM.
+ * Moving position markers keep [circleDrawable].
+ */
+private fun pinDrawable(
+    context:  android.content.Context,
+    colorInt: Int,
+    sizeDp:   Int,
+): android.graphics.drawable.BitmapDrawable {
+    val density = context.resources.displayMetrics.density
+    val w = (sizeDp * density).coerceAtLeast(8f)
+    val h = w * 1.35f
+    val cx = w / 2f
+    val r  = w / 2f
+
+    val bmp    = Bitmap.createBitmap(w.toInt(), h.toInt(), Bitmap.Config.ARGB_8888)
+    val canvas = Canvas(bmp)
+    val fill   = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = colorInt; style = Paint.Style.FILL }
+
+    canvas.drawCircle(cx, r, r, fill)
+
+    val tail = android.graphics.Path().apply {
+        moveTo(cx - r * 0.78f, r + r * 0.55f)
+        lineTo(cx + r * 0.78f, r + r * 0.55f)
+        lineTo(cx, h)
+        close()
+    }
+    canvas.drawPath(tail, fill)
+
+    val holePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = android.graphics.Color.WHITE
+        style = Paint.Style.FILL
+    }
+    canvas.drawCircle(cx, r, r * 0.42f, holePaint)
+
     return android.graphics.drawable.BitmapDrawable(context.resources, bmp)
 }
 

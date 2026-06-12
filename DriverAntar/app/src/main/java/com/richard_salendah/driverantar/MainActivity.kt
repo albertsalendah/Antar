@@ -28,8 +28,6 @@ import com.richard_salendah.driverantar.ui.service.LocationService
 import com.richard_salendah.driverantar.utils.ConnectivityObserver
 import com.richard_salendah.driverantar.utils.SessionManager
 import org.osmdroid.config.Configuration
-import org.conscrypt.Conscrypt
-import java.security.Security
 
 /**
  * Single Activity — all screens are Compose destinations in AppNavGraph.
@@ -75,7 +73,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        Security.insertProviderAt(Conscrypt.newProvider(), 1)
+
         // ── MUST be first — everything below depends on these two ─────────────
         // SessionManager reads/writes SharedPreferences and needs a Context.
         // RetrofitClient.instance is a lazy delegate — if it evaluates before

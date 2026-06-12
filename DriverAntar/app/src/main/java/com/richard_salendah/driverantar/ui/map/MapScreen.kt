@@ -28,6 +28,7 @@ import org.osmdroid.tileprovider.tilesource.TileSourceFactory
 import org.osmdroid.util.GeoPoint
 import org.osmdroid.views.MapView
 import org.osmdroid.views.overlay.Marker
+import androidx.core.graphics.createBitmap
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -64,6 +65,43 @@ fun MapScreen(
             viewModel.clearRecoveredRoute()
             onNavigateToTrip(recoveredRoute)
         }
+    }
+
+    // Add this at the bottom of MapScreen.kt
+     fun pinDrawable(
+        context:  android.content.Context,
+        colorInt: Int,
+        sizeDp:   Int,
+    ): android.graphics.drawable.BitmapDrawable {
+        val density = context.resources.displayMetrics.density
+        val w = (sizeDp * density).coerceAtLeast(8f)
+        val h = w * 1.35f
+        val cx = w / 2f
+        val r  = w / 2f
+
+        val bmp    = createBitmap(w.toInt(), h.toInt())
+        val canvas = android.graphics.Canvas(bmp)
+        val fill   = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
+            color = colorInt
+            style = android.graphics.Paint.Style.FILL
+        }
+        canvas.drawCircle(cx, r, r, fill)
+
+        val tail = android.graphics.Path().apply {
+            moveTo(cx - r * 0.78f, r + r * 0.55f)
+            lineTo(cx + r * 0.78f, r + r * 0.55f)
+            lineTo(cx, h)
+            close()
+        }
+        canvas.drawPath(tail, fill)
+
+        val holePaint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
+            color = android.graphics.Color.WHITE
+            style = android.graphics.Paint.Style.FILL
+        }
+        canvas.drawCircle(cx, r, r * 0.42f, holePaint)
+
+        return android.graphics.drawable.BitmapDrawable(context.resources, bmp)
     }
 
     // Switch is enabled only when ALL conditions are met:
@@ -155,6 +193,15 @@ fun MapScreen(
 
         val mapViewRef = remember { mutableStateOf<MapView?>(null) }
 
+        val driverMarkerIcon = remember(viewModel.isOnline) {
+            val pinColor = if (viewModel.isOnline) {
+                android.graphics.Color.parseColor("#4CAF50") // Vibrant Green for Online
+            } else {
+                android.graphics.Color.parseColor("#757575") // Slick Gray for Offline
+            }
+            pinDrawable(context, colorInt = pinColor, sizeDp = 30)
+        }
+
         Box(
             modifier = Modifier
                 .padding(padding)
@@ -170,9 +217,11 @@ fun MapScreen(
                         setMultiTouchControls(true)
                         controller.setZoom(15.0)
                         controller.setCenter(GeoPoint(1.4748, 124.8421))
+
                         val marker = Marker(this).apply {
                             setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_BOTTOM)
                             title = "You"
+                            icon = driverMarkerIcon // 2. Assign the pin here initially
                         }
                         overlays.add(marker)
                         tag = marker
@@ -186,11 +235,12 @@ fun MapScreen(
                         // Always keep the marker on the correct spot
                         marker.position = geoPoint
 
-                        // Center the camera on the first valid GPS fix after
-                        // every (re)composition — this covers:
-                        //   1. Fresh app start (no position yet)
-                        //   2. Navigation back to this screen (AndroidView recreated,
-                        //      initialCenterDone resets to false, camera re-centers once)
+                        // 3. Update the icon when status changes (Online vs Offline colors)
+                        if (marker.icon != driverMarkerIcon) {
+                            marker.icon = driverMarkerIcon
+                        }
+
+                        // Center the camera on the first valid GPS fix after every (re)composition
                         if (!initialCenterDone.value) {
                             mapView.controller.setCenter(geoPoint)
                             mapView.controller.setZoom(15.0)
