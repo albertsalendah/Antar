@@ -4,103 +4,80 @@
 
 ---
 
-## Recently Completed — Driver app route/marker pass (this session, applied)
+## ✅ Driver app pass — complete
 
-- **Route caching redesign** in `DriverAntar/.../ui/trip/Activetripviewmodel.kt`:
-  cache, OSRM-failure cooldown, and destination-binding now live **entirely in the
-  ViewModel** (`cachedDestLat`/`cachedDestLng`, `lastOsrmFailureMs`, 5-min
-  `OSRM_COOLDOWN_MS`). `RouteHelper.kt` needed **no changes** — this supersedes the
-  old ROUTE-FALLBACK-MISSING / OSRM-CACHE-MISSING plan for the driver app, and is
-  the pattern to repeat for the rider app (see below).
-- **Immediate route draw on trip load** — `loadTrip()` now calls
-  `fetchRouteIfNeeded()` using `currentGeoPoint` if a GPS fix is already available,
-  fixing the delay where GPS replay arrives before the trip loads.
-- **`startTrip()`** resets `cachedDestLat/Lng` + `lastOsrmFailureMs` so the dropoff
-  leg gets a fresh OSRM attempt instead of reusing the pickup leg's cache/cooldown.
-- **Teardrop pin markers** (`pinDrawable()`) added to `Activetripscreen.kt` for the
-  pickup and dropoff/"Tujuan" markers. Driver's own "Posisi Anda" position marker
-  stays `circleDrawable` (moving markers keep circles per agreed scope).
-- **CONSCRYPT-PLACEMENT ✅ resolved for both apps** — `Security.insertProviderAt`
-  moved from `MainActivity.onCreate()` to Application-level `onCreate()` in both
-  `Antar.kt` (rider) and `Driverapplication.kt` (driver).
+All driver-app route/marker/distance-ETA/reliability work for this round is
+done (see `ANTAR_DONE.md` for full detail). Summary of what just landed:
+
+- **Distance/ETA display** on `ActiveTripScreen` (driver) — top-left info card,
+  shown for `agreed`/`in_progress`, hidden on `arrived`. Design now FINAL:
+  - `RouteHelper.fetchRoute()` returns `RouteResult(points, distanceMeters,
+    durationSeconds)` instead of `List<GeoPoint>?`, parsed from OSRM's
+    top-level `distance`/`duration`.
+  - `ActiveTripViewModel` exposes `routeDistanceMeters` / `routeDurationSeconds`,
+    updated together with `routePoints` (same staleness window, ~50m movement);
+    `startTrip()` resets all three together.
+  - Straight-line fallback: distance via `RouteHelper.distanceMeters()`
+    (Haversine), duration omitted (`null`) — no average-speed guess.
+  - Formatting: meters <1km (e.g. "650 m"), km with 1 decimal otherwise
+    (e.g. "3.2 km"); minutes <60 (e.g. "8 min"), else "1h 15m".
+- **NOTIF-DEEPLINK fixed** — new `ui/navigation/DeepLinkHandler.kt` (driver,
+  same pattern as rider's DEEP-1); `MainActivity.onNewIntent()` emits,
+  `AppNavGraph` collects and navigates when logged in. Cold-start path
+  (existing `deepLinkRoute` param) unchanged.
+- **KEYSTORE-CRASH fixed** — `SessionManager.init()` (driver) wraps
+  `EncryptedSharedPreferences.create()` in try/catch; on failure wipes the
+  stale prefs file + `MasterKey.DEFAULT_MASTER_KEY_ALIAS` from
+  `AndroidKeyStore` and recreates with a fresh key (forces one-time re-login).
+
+### Earlier completed (prior session, driver route/marker pass)
+- Route caching/cooldown/destination-binding redesign lives entirely in
+  `Activetripviewmodel.kt` (`cachedDestLat/Lng`, `lastOsrmFailureMs`, 5-min
+  `OSRM_COOLDOWN_MS`); immediate route draw on `loadTrip()`; `startTrip()`
+  resets cache for the dropoff leg.
+- Teardrop `pinDrawable()` markers for pickup/dropoff/"Tujuan"; driver's own
+  position marker stays `circleDrawable`.
+- CONSCRYPT-PLACEMENT resolved for both apps — `Security.insertProviderAt`
+  moved to Application-level `onCreate()`.
 
 ### Earlier completed (background, unchanged)
-NavGraph `observeForever` leak fix (StateFlow + LaunchedEffect), missing index on
-`trips.notified_driver_id`, `search_path` security fix on 5 DB functions, DEEP-1
-buffer fix, rider route-line race fix (`combine(_driverLocation, _trip)` +
-`routePoints` LaunchedEffect key), `PollingLocationTracker` 15s→5s, VIBRATE
-permission fix, Conscrypt+OkHttp TLS fix for rider OSRM calls.
+NavGraph `observeForever` leak fix, missing index on
+`trips.notified_driver_id`, `search_path` security fix on 5 DB functions,
+DEEP-1 buffer fix (rider), rider route-line race fix
+(`combine(_driverLocation, _trip)` + `routePoints` LaunchedEffect key),
+`PollingLocationTracker` 15s→5s, VIBRATE permission fix, Conscrypt+OkHttp TLS
+fix for rider OSRM calls.
 
 ---
 
-## 🔴 Next Up — Distance/ETA display (driver app first)
+## 🔴 Next Up — Rider app pass
 
-Add "distance to destination" and "time to destination" in a **small info card,
-top-left corner** of the map on `ActiveTripScreen`. Metric units.
+Apply the same patterns just finished for the driver app to the rider "Antar"
+app. All design decisions below are final (carried over from the driver pass).
 
-Design discussed but **not yet finalized** — confirm at the start of next session:
-
-1. **Return type change**: `RouteHelper.fetchRoute()` currently discards OSRM's
-   route-level `distance` (meters) and `duration` (seconds), returning only
-   `List<GeoPoint>?`. Proposed: introduce a `RouteResult(points, distanceMeters,
-   durationSeconds)` data class and return that instead. Affects both apps'
-   RouteHelper/OsrmRouteHelper and the ViewModel call sites built this session.
-2. **Staleness**: store `routeDistanceMeters` / `routeDurationSeconds` alongside
-   `routePoints` / `cachedDestLat/Lng`, updated together on OSRM success — same
-   freshness window as the polyline (refreshes ~every 50m of movement).
-3. **Open question**: when OSRM has never succeeded for the current leg (pure
-   straight-line fallback, no road-route cache) — show straight-line distance via
-   the existing `RouteHelper.distanceMeters()`, and either omit the time estimate
-   or use a rough average-speed-based estimate. Needs a decision before coding.
-4. **Formatting (proposed, confirm)**: distance as meters when <1km (e.g. "650 m"),
-   km with 1 decimal otherwise (e.g. "3.2 km"); time as minutes when <60 (e.g.
-   "8 min"), hours+minutes otherwise (e.g. "1h 15m").
-
-Sequencing: implement for **driver app** first (`Activetripviewmodel.kt` +
-`Activetripscreen.kt`), then carry the same pattern to the rider app.
-
----
-
-## 🟠 Next Up — Rider app: repeat the route/marker pass
-
-Apply the same set of changes just completed for the driver app to the rider app
-(`Antar`):
-
-- `ActiveTripViewModel.kt` (rider): same cache/cooldown/destination-binding
-  redesign for `OsrmRouteHelper` calls, plus the immediate-route-on-load fix.
-  Rider already has the `combine(_driverLocation, _trip)` fix from a prior
-  session — check whether destination-binding is *also* needed there for
-  pickup→dropoff leg transitions.
-- `pinDrawable()` for rider's pickup/dropoff/"Tujuan" markers in `HomeScreen.kt`
-  and `ActiveTripScreen.kt`. Rider's driver-position and own-location markers
-  stay `circleDrawable`.
-- Distance/ETA info card (same design as driver app, once finalized above).
+1. **Route caching/marker redesign** — `Antar/.../ui/trip/Activetripviewmodel.kt`:
+   move cache/cooldown/destination-binding entirely into the ViewModel,
+   following driver's `Activetripviewmodel.kt` (`cachedDestLat/Lng`,
+   `lastOsrmFailureMs`, `OSRM_COOLDOWN_MS`). Rider already has the
+   `combine(_driverLocation, _trip)` fix from a prior session — check whether
+   destination-binding is *also* needed for pickup→dropoff leg transitions.
+2. **Teardrop `pinDrawable()` markers** for rider's pickup/dropoff/"Tujuan" in
+   `HomeScreen.kt` and `ActiveTripScreen.kt`. Driver-position and own-location
+   markers stay `circleDrawable` — same scope as driver app.
+3. **Distance/ETA info card** — port the now-finalized driver design
+   (`RouteResult`, top-left card, formatting rules, straight-line-omits-duration)
+   to `Antar/.../ui/trip/Osrmroutehelper.kt` + `Activetripviewmodel.kt` +
+   `Activetripscreen.kt`. `OsrmRouteHelper.fetchRoute()` needs the same
+   `RouteResult` return-type change as the driver's `RouteHelper`.
+4. **TOKEN-RACE** (bundle into this pass — same file area as #1/#3):
+   `Antar/.../data/remote/Apiclient.kt` `TokenAuthenticator` uses
+   `@Volatile isRefreshing`, letting two simultaneous 401s both pass the guard.
+   Replace with `Mutex` + `withLock`, following driver's
+   `RetrofitClient.AuthInterceptor` exactly.
 
 ---
 
 ## Fix Priority Order — carried over, unaddressed
-
-### 🟠 Medium — Crashes on specific devices/conditions
-
-**NOTIF-DEEPLINK (Driver app)**
-When the driver app is backgrounded but not killed, FCM notification taps
-(new_trip, offer_accepted) don't navigate anywhere — the intent extra is ignored.
-- File: `DriverAntar/ui/.../MainActivity.kt` → `onNewIntent()`
-- Fix: add a `handleFcmIntent(intent)` helper and call it from `onNewIntent()`,
-  same pattern as `Antar/MainActivity.kt`
-- Note: cold-start taps work fine — only backgrounded-app taps are broken
-
-**KEYSTORE-CRASH (Driver app, Android 9)**
-`SessionManager.init()` calls `EncryptedSharedPreferences.create()` with no
-try-catch. If the hardware KeyStore is invalidated (lock screen type change,
-first lock screen setup on a new account), it throws `GeneralSecurityException`
-and the app crashes permanently on every cold start until reinstalled.
-- File: `DriverAntar/.../utils/Sessionmanager.kt` → `init()`
-- Fix: wrap in try-catch; on failure, delete the prefs file and recreate with a
-  fresh key (forces re-login); follow the documented migration note already in
-  that file
-
----
 
 ### 🟡 Low — Silent errors / best practice
 
@@ -112,14 +89,6 @@ with a `!!` force-unwrap. On devices with Eastern Arabic numeral locales,
   `dayFullName()`
 - Fix: change `Locale.getDefault()` to `Locale.US` (pattern already used in
   `TripHistoryScreen.kt` `formatDate()`)
-
-**TOKEN-RACE (Rider app)**
-`ApiClient.kt` `TokenAuthenticator` uses `@Volatile isRefreshing` — two
-simultaneous 401s can both pass the guard. Driver app correctly uses `Mutex` in
-`RetrofitClient.kt`.
-- File: `Antar/.../data/remote/Apiclient.kt` → `TokenAuthenticator`
-- Fix: replace `@Volatile isRefreshing` + `try/finally` with `Mutex` +
-  `withLock`, follow `RetrofitClient.AuthInterceptor` pattern exactly
 
 ---
 

@@ -61,6 +61,16 @@ fun AppNavGraph(
         }
     }
 
+    // NOTIF-DEEPLINK: handles FCM taps while the app is backgrounded but not
+    // killed — onNewIntent() emits here since onCreate's deepLinkRoute won't re-fire.
+    LaunchedEffect(navController) {
+        DeepLinkHandler.events.collect { route ->
+            if (SessionManager.isLoggedIn) {
+                navController.navigate(route) { launchSingleTop = true }
+            }
+        }
+    }
+
     NavHost(navController = navController, startDestination = startDestination) {
 
         // ── Auth ──────────────────────────────────────────────────────────────

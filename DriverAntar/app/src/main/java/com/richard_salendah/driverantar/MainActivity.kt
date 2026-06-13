@@ -28,6 +28,7 @@ import com.richard_salendah.driverantar.ui.service.LocationService
 import com.richard_salendah.driverantar.utils.ConnectivityObserver
 import com.richard_salendah.driverantar.utils.SessionManager
 import org.osmdroid.config.Configuration
+import com.richard_salendah.driverantar.ui.navigation.DeepLinkHandler
 
 /**
  * Single Activity — all screens are Compose destinations in AppNavGraph.
@@ -127,6 +128,9 @@ class MainActivity : ComponentActivity() {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
+        // App backgrounded (not killed) — onCreate's deepLinkRoute path won't
+        // fire again, so route via DeepLinkHandler instead (cold-start unaffected).
+        intent.getStringExtra(EXTRA_NAVIGATE_TO)?.let { DeepLinkHandler.emit(it) }
     }
 
     override fun onDestroy() {

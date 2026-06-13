@@ -147,6 +147,36 @@ fun ActiveTripScreen(
             }
         }
 
+        // ── Distance/ETA info card ──────────────────────────────────────────
+        val distanceMeters = viewModel.routeDistanceMeters
+        if (distanceMeters != null && (trip?.status == "agreed" || trip?.status == "in_progress")) {
+            Surface(
+                modifier = Modifier
+                    .align(Alignment.TopStart)
+                    .statusBarsPadding()
+                    .padding(12.dp),
+                shape           = RoundedCornerShape(12.dp),
+                color           = Color.White,
+                shadowElevation = 4.dp,
+            ) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    Icon(Icons.Default.LocationOn, null,
+                        tint = Color(0xFF1B6CA8), modifier = Modifier.size(16.dp))
+                    Text(formatDistance(distanceMeters),
+                        style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.SemiBold))
+                    viewModel.routeDurationSeconds?.let { duration ->
+                        Text("•", color = Color(0xFFBBBBBB))
+                        Text(formatDuration(duration),
+                            style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.SemiBold))
+                    }
+                }
+            }
+        }
+
         // ── Draggable bottom sheet ────────────────────────────────────────────
         Box(
             modifier = Modifier
@@ -743,4 +773,15 @@ private fun pinDrawable(
 private fun formatRupiah(amount: Double): String {
     val fmt = NumberFormat.getNumberInstance(Locale("id", "ID"))
     return "Rp ${fmt.format(amount.roundToInt())}"
+}
+
+private fun formatDistance(meters: Double): String = when {
+    meters < 1_000 -> "${meters.roundToInt()} m"
+    else            -> "%.1f km".format(meters / 1_000)
+}
+
+private fun formatDuration(seconds: Double): String {
+    val totalMinutes = (seconds / 60).roundToInt()
+    return if (totalMinutes < 60) "$totalMinutes min"
+    else "${totalMinutes / 60}h ${totalMinutes % 60}m"
 }

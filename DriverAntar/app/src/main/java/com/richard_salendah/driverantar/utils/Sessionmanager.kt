@@ -4,6 +4,7 @@ import android.content.Context
 import android.content.SharedPreferences
 import androidx.security.crypto.EncryptedSharedPreferences
 import androidx.security.crypto.MasterKey
+import java.security.KeyStore
 
 /**
  * Persists the driver session across app restarts.
@@ -32,12 +33,35 @@ object SessionManager {
 
     private lateinit var prefs: SharedPreferences
 
+    /**
+     * KEYSTORE-CRASH fix: if the Keystore-backed master key was invalidated
+     * (e.g. lock screen type changed, first unlock on a new account), creating
+     * EncryptedSharedPreferences throws GeneralSecurityException and would
+     * otherwise crash on every cold start. Recover by wiping the stale prefs
+     * file + Keystore alias and recreating with a fresh key — forces a
+     * one-time re-login, per the migration note above.
+     */
     fun init(context: Context) {
+        prefs = try {
+            createEncryptedPrefs(context)
+        } catch (e: Exception) {
+            context.deleteSharedPreferences(PREF_NAME)
+            try {
+                KeyStore.getInstance("AndroidKeyStore").apply {
+                    load(null)
+                    deleteEntry(MasterKey.DEFAULT_MASTER_KEY_ALIAS)
+                }
+            } catch (_: Exception) { /* alias may not exist — ignore */ }
+            createEncryptedPrefs(context)
+        }
+    }
+
+    private fun createEncryptedPrefs(context: Context): SharedPreferences {
         val masterKey = MasterKey.Builder(context)
             .setKeyScheme(MasterKey.KeyScheme.AES256_GCM)
             .build()
 
-        prefs = EncryptedSharedPreferences.create(
+        return EncryptedSharedPreferences.create(
             context,
             PREF_NAME,
             masterKey,

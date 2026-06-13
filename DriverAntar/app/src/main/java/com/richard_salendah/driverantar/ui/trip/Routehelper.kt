@@ -8,12 +8,17 @@ import java.net.HttpURLConnection
 import java.net.URL
 import kotlin.math.*
 
+data class RouteResult(
+    val points: List<GeoPoint>,
+    val distanceMeters: Double,
+    val durationSeconds: Double
+)
 object RouteHelper {
 
     suspend fun fetchRoute(
         originLat: Double, originLng: Double,
         destLat: Double,   destLng: Double,
-    ): List<GeoPoint>? = withContext(Dispatchers.IO) {
+    ): RouteResult? = withContext(Dispatchers.IO) {
         if (originLat == 0.0 && originLng == 0.0) return@withContext null
         if (destLat   == 0.0 && destLng   == 0.0) return@withContext null
         runCatching {
@@ -27,14 +32,17 @@ object RouteHelper {
             val json   = JSONObject(conn.inputStream.bufferedReader().readText())
             val routes = json.getJSONArray("routes")
             if (routes.length() == 0) return@runCatching null
-            val coords = routes.getJSONObject(0)
-                .getJSONObject("geometry")
-                .getJSONArray("coordinates")
-            // OSRM returns [lng, lat] pairs — convert to GeoPoint(lat, lng)
-            (0 until coords.length()).map { i ->
+            val route  = routes.getJSONObject(0)
+            val coords = route.getJSONObject("geometry").getJSONArray("coordinates")
+            val points = (0 until coords.length()).map { i ->
                 val pt = coords.getJSONArray(i)
                 GeoPoint(pt.getDouble(1), pt.getDouble(0))
             }
+            RouteResult(
+                points          = points,
+                distanceMeters  = route.getDouble("distance"),
+                durationSeconds = route.getDouble("duration"),
+            )
         }.getOrNull()
     }
 

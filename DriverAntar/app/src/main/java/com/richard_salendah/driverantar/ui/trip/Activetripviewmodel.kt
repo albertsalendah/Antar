@@ -46,6 +46,8 @@ class ActiveTripViewModel(
 
     // ── Route state ───────────────────────────────────────────────────────────
     var routePoints           by mutableStateOf<List<GeoPoint>>(emptyList()); private set
+    var routeDistanceMeters  by mutableStateOf<Double?>(null); private set
+    var routeDurationSeconds by mutableStateOf<Double?>(null); private set
     private var lastRouteFetchLat = 0.0
     private var lastRouteFetchLng = 0.0
 
@@ -214,24 +216,23 @@ class ActiveTripViewModel(
 
             when {
                 fresh != null -> {
-                    // OSRM succeeded — update cache, clear cooldown
-                    routePoints       = fresh
-                    cachedDestLat     = destLat
-                    cachedDestLng     = destLng
-                    lastOsrmFailureMs = 0L
+                    routePoints           = fresh.points
+                    routeDistanceMeters   = fresh.distanceMeters
+                    routeDurationSeconds  = fresh.durationSeconds
+                    cachedDestLat         = destLat
+                    cachedDestLng         = destLng
+                    lastOsrmFailureMs     = 0L
                 }
                 routePoints.isNotEmpty() &&
                         cachedDestLat == destLat && cachedDestLng == destLng -> {
-                    // OSRM unavailable — keep showing the stale road route,
-                    // still anchored to the correct destination for this leg
                     if (!cooldownActive) lastOsrmFailureMs = now
                 }
                 else -> {
-                    // No usable cache for this destination — straight line,
-                    // last resort
-                    routePoints   = listOf(
+                    routePoints = listOf(
                         GeoPoint(driverLat, driverLng), GeoPoint(destLat, destLng)
                     )
+                    routeDistanceMeters  = RouteHelper.distanceMeters(driverLat, driverLng, destLat, destLng)
+                    routeDurationSeconds = null
                     cachedDestLat = destLat
                     cachedDestLng = destLng
                     if (!cooldownActive) lastOsrmFailureMs = now
@@ -268,6 +269,8 @@ class ActiveTripViewModel(
                     cachedDestLat     = 0.0
                     cachedDestLng     = 0.0
                     lastOsrmFailureMs = 0L
+                    routeDistanceMeters  = null
+                    routeDurationSeconds = null
                 }
                 .onFailure { e ->
                     uiState = ActiveTripUiState.Error(

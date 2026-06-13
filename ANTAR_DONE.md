@@ -1,5 +1,5 @@
 # Antar — Completed Work Log
-**Last updated:** June 2026
+**Last updated:** June 2026 (driver app session complete)
 **Do NOT paste this in new AI sessions unless debugging a regression.**
 **Reference only — tracks what has been built and fixed.**
 
@@ -130,20 +130,23 @@
 | OfferPrice | Fare stepper, floor price enforcement, trip summary card |
 | WaitingForRider | Realtime + 5s polling fallback, spinning clock, offered fare shown |
 | CounterDecision | Accept/Counter/Reject, fare stepper, driver counter limit, floor enforcement |
-| ActiveTrip | Full-screen map, draggable bottom sheet, OSRM road route with straight-line fallback, 4-step stepper, rider info + call, fare card, Realtime + 6s polling fallback (CONN-8), double-tap guard on all actions (CONN-7), complete button within 150m of dropoff |
+| ActiveTrip | Full-screen map, draggable bottom sheet, OSRM road route with straight-line fallback, teardrop pickup/dropoff markers, distance/ETA info card (top-left, hidden on `arrived`), 4-step stepper, rider info + call, fare card, Realtime + 6s polling fallback (CONN-8), double-tap guard on all actions (CONN-7), complete button within 150m of dropoff |
 | RateRider | 5-star tap selector, optional comment, skip option |
 | TripHistory | Paginated, skeleton, infinite scroll, date formatted with Locale.US parser |
 
 ### Driver — Other Completed Work
 - `LocationService`: foreground service, `goOffline()` with 3s timeout (ANR-1 fixed), `SessionManager.init()` guard in `onStartCommand` (INIT-RACE fixed)
 - `AuthInterceptor`: Mutex-based token refresh (TOKEN-RACE fixed), `ACTION_SESSION_EXPIRED` broadcast
-- `SessionManager`: EncryptedSharedPreferences (AES256-GCM)
+- `SessionManager`: EncryptedSharedPreferences (AES256-GCM); `init()` now recovers from an invalidated Keystore master key by wiping the prefs file + `MasterKey.DEFAULT_MASTER_KEY_ALIAS` and recreating — forces one-time re-login (KEYSTORE-CRASH fixed)
 - `ConnectivityObserver`: `onLost` sets false unconditionally (CONN-9 fixed)
 - `TripSelectionHolder`: cleared on composable dispose via `DisposableEffect` (HOLDER-1 fixed)
 - `WaitingForRiderViewModel`: Realtime + 5s polling fallback (CONN-6 fixed)
-- `RouteHelper`: OSRM failure caching (5-min cooldown), straight-line fallback via `fetchRouteWithFallback`
+- `RouteHelper`: OSRM failure caching (5-min cooldown), straight-line fallback via `fetchRouteWithFallback`; `fetchRoute()` now returns `RouteResult(points, distanceMeters, durationSeconds)` parsed from OSRM's top-level `distance`/`duration` — feeds the ActiveTrip distance/ETA card
+- `ActiveTripViewModel`: route caching/cooldown/destination-binding redesign lives entirely in the ViewModel (`cachedDestLat/Lng`, `lastOsrmFailureMs`, `OSRM_COOLDOWN_MS`); exposes `routeDistanceMeters`/`routeDurationSeconds` alongside `routePoints`, reset together in `startTrip()`
+- `ActiveTripScreen`: top-left distance/ETA info card (meters/km, minutes/h+m formatting; straight-line fallback omits duration)
+- `DeepLinkHandler` (new, driver): FCM taps now navigate while the app is backgrounded-but-not-killed via `MainActivity.onNewIntent()` + `AppNavGraph` collector (NOTIF-DEEPLINK fixed); cold-start path unchanged
 - Haptic feedback on offer submit, complete, etc. — VIBRATE permission added to manifest
-- Conscrypt added + `Security.insertProviderAt` in `MainActivity.onCreate()` — fixes TLS on Android 9
+- Conscrypt added + `Security.insertProviderAt` in Application-level `onCreate()` (`Driverapplication.kt`) — fixes TLS on Android 9 (CONSCRYPT-PLACEMENT)
 - `TripHistoryScreen`: `formatDate` uses `Locale.US` for parsing (DATE-1 fixed)
 
 ---
@@ -185,11 +188,11 @@
 | Route line not rendering (rider) | `routePoints` missing from `LaunchedEffect` keys in `ActiveTripScreen` | Added `routePoints` as key; map overlays now redraw when route updates |
 | Route line race condition (rider) | `trip` was null when first `driverLocation` emit arrived in `observeLocationForRouting` | Replaced separate collect with `combine(_driverLocation, _trip)` |
 | OSRM "Handshake failed" (rider) | Firebase 34.x pollutes global `SSLContext.getDefault()` | Explicit `SSLContext` + system `TrustManager` in `OsrmRouteHelper` OkHttpClient |
-| TLSv1.3 on Android 9 | Android 9 only supports TLSv1.2; OSRM requires TLSv1.3 | Added Conscrypt provider in both app `MainActivity.onCreate()` |
+| TLSv1.3 on Android 9 | Android 9 only supports TLSv1.2; OSRM requires TLSv1.3 | Added Conscrypt provider in both app `MainActivity.onCreate()` (later moved to Application `onCreate()` — CONSCRYPT-PLACEMENT) |
 | Haptic crash on Android 9 | `VIBRATE` permission missing from manifest | Added to both `AndroidManifest.xml` |
 | Slow driver movement (rider) | `PollingLocationTracker` fallback was 15s | Reduced to 5s — worst-case lag now ~8s instead of ~18s |
 | OSRM wasted retries | Every driver movement triggered a ~1s failing OSRM call | 5-min failure cache in `OsrmRouteHelper` and `RouteHelper` |
-| DEEP-1 | `DeepLinkHandler` buffer=1 dropped second simultaneous FCM event | Increased to `extraBufferCapacity = 4` |
+| DEEP-1 | `DeepLinkHandler` buffer=1 dropped second simultaneous FCM event (rider) | Increased to `extraBufferCapacity = 4` |
 | DB missing index | `trips.notified_driver_id` FK had no index | Created `idx_trips_notified_driver_id` via migration |
 | E | `getDailyEarnings` 404 — URL missing `api/v1/` prefix | Fixed `@GET` path in `DriverApiService.kt` |
 | 1 | Rider ActiveTrip route line never shows (first fix) | `observeLocationForRouting` returned early when trip was null on first emit |
@@ -202,6 +205,11 @@
 | D | Pickup pin visible when rider is in vehicle | Hidden when `status == "in_progress"` on both screens |
 | EARN-TZ | Daily earnings chart used wrong timezone | `GetDailyEarnings` uses `AT TIME ZONE 'Asia/Makassar'` |
 | REQ-DUP-SRV | `RequestRide` no duplicate guard | `WHERE NOT EXISTS` check before INSERT |
+| CONSCRYPT-PLACEMENT | Conscrypt provider registered too late (Activity, not Application) | Moved `Security.insertProviderAt` to Application-level `onCreate()` in `Antar.kt` and `Driverapplication.kt`, both apps |
+| ROUTE-FALLBACK-MISSING / OSRM-CACHE-MISSING (driver) | Route cache/cooldown/destination-binding logic was scattered | Redesigned entirely inside `Activetripviewmodel.kt` — `cachedDestLat/Lng`, `lastOsrmFailureMs`, 5-min `OSRM_COOLDOWN_MS`; `RouteHelper.kt` unchanged aside from `RouteResult` |
+| DIST-ETA (driver) | No distance/time-to-destination shown on ActiveTrip | `RouteHelper.fetchRoute()` returns `RouteResult(points, distanceMeters, durationSeconds)`; top-left info card on `ActiveTripScreen`, straight-line fallback omits duration |
+| NOTIF-DEEPLINK (driver) | FCM taps (`new_trip`, `offer_accepted`) ignored while app backgrounded-but-not-killed | New `DeepLinkHandler` (driver); `MainActivity.onNewIntent()` emits; `AppNavGraph` collects and navigates when logged in |
+| KEYSTORE-CRASH (driver) | `EncryptedSharedPreferences.create()` crash-loops forever on cold start if Keystore master key invalidated (Android 9) | `SessionManager.init()` wraps in try/catch — wipes prefs file + `MasterKey.DEFAULT_MASTER_KEY_ALIAS`, recreates with fresh key, forces one-time re-login |
 
 ---
 
