@@ -126,7 +126,7 @@ fun HomeScreen(
     // Maximum sheet height = 75% of screen
     val maxSheetHeight: Dp = screenHeightDp * 0.75f
     // Minimum (collapsed) sheet height
-    val minSheetHeight: Dp = 400.dp
+    val minSheetHeight: Dp = 405.dp
 
     var hasPermission by remember {
         mutableStateOf(
@@ -362,7 +362,7 @@ fun HomeScreen(
             modifier = Modifier
                 .align(Alignment.BottomEnd)
                 .navigationBarsPadding()
-                .padding(bottom = sheetHeight + 16.dp, end = 16.dp),
+                .padding(bottom = sheetHeight-40.dp, end = 16.dp),
         ) {
             FloatingActionButton(
                 onClick = {
@@ -726,18 +726,18 @@ private fun updateMarkers(
         }
     }
     // User location
-    userLocation?.let { (lat, lng) ->
-        Marker(map).apply {
-            id = "user"; position = GeoPoint(lat, lng); title = "Lokasi Anda"
-            icon = circleDrawable(map.context, 0xFF1B6CA8.toInt(), 18)
-            setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_CENTER); map.overlays.add(this)
-        }
-    }
+//    userLocation?.let { (lat, lng) ->
+//        Marker(map).apply {
+//            id = "user"; position = GeoPoint(lat, lng); title = "Lokasi Anda"
+//            icon = circleDrawable(map.context, 0xFF1B6CA8.toInt(), 18)
+//            setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_CENTER); map.overlays.add(this)
+//        }
+//    }
     // Pickup pin
     if (pickupLat != 0.0 && pickerMode != PickerMode.Pickup) {
         Marker(map).apply {
             id = "pickup"; position = GeoPoint(pickupLat, pickupLng); title = "Penjemputan"
-            icon = circleDrawable(map.context, 0xFF1B6CA8.toInt(), 30)
+            icon = pinDrawable(map.context, 0xFF1B6CA8.toInt(), 30)
             setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_BOTTOM); map.overlays.add(this)
         }
     }
@@ -745,7 +745,7 @@ private fun updateMarkers(
     if (dropoffLat != 0.0 && pickerMode != PickerMode.Dropoff) {
         Marker(map).apply {
             id = "dropoff"; position = GeoPoint(dropoffLat, dropoffLng); title = "Tujuan"
-            icon = circleDrawable(map.context, 0xFFE53935.toInt(), 30)
+            icon = pinDrawable(map.context, 0xFFE53935.toInt(), 30)
             setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_BOTTOM); map.overlays.add(this)
         }
     }
@@ -762,6 +762,34 @@ private fun circleDrawable(context: android.content.Context, colorInt: Int, size
         Paint(Paint.ANTI_ALIAS_FLAG).apply {
             color = android.graphics.Color.WHITE; style = Paint.Style.STROKE; strokeWidth = px * 0.18f
         })
+    return android.graphics.drawable.BitmapDrawable(context.resources, bmp)
+}
+
+private fun pinDrawable(
+    context:  android.content.Context,
+    colorInt: Int,
+    sizeDp:   Int,
+): android.graphics.drawable.BitmapDrawable {
+    val density = context.resources.displayMetrics.density
+    val w = (sizeDp * density).coerceAtLeast(8f)
+    val h = w * 1.35f
+    val cx = w / 2f
+    val r  = w / 2f
+    val bmp    = Bitmap.createBitmap(w.toInt(), h.toInt(), Bitmap.Config.ARGB_8888)
+    val canvas = Canvas(bmp)
+    val fill   = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = colorInt; style = Paint.Style.FILL }
+    canvas.drawCircle(cx, r, r, fill)
+    val tail = android.graphics.Path().apply {
+        moveTo(cx - r * 0.78f, r + r * 0.55f)
+        lineTo(cx + r * 0.78f, r + r * 0.55f)
+        lineTo(cx, h)
+        close()
+    }
+    canvas.drawPath(tail, fill)
+    val holePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = android.graphics.Color.WHITE; style = Paint.Style.FILL
+    }
+    canvas.drawCircle(cx, r, r * 0.42f, holePaint)
     return android.graphics.drawable.BitmapDrawable(context.resources, bmp)
 }
 

@@ -4,76 +4,82 @@
 
 ---
 
-## ✅ Driver app pass — complete
+## ✅ Rider app pass — complete
 
-All driver-app route/marker/distance-ETA/reliability work for this round is
-done (see `ANTAR_DONE.md` for full detail). Summary of what just landed:
+All four rider-app items from the planned pass are done (see `ANTAR_DONE.md`):
 
-- **Distance/ETA display** on `ActiveTripScreen` (driver) — top-left info card,
-  shown for `agreed`/`in_progress`, hidden on `arrived`. Design now FINAL:
-  - `RouteHelper.fetchRoute()` returns `RouteResult(points, distanceMeters,
-    durationSeconds)` instead of `List<GeoPoint>?`, parsed from OSRM's
-    top-level `distance`/`duration`.
-  - `ActiveTripViewModel` exposes `routeDistanceMeters` / `routeDurationSeconds`,
-    updated together with `routePoints` (same staleness window, ~50m movement);
-    `startTrip()` resets all three together.
-  - Straight-line fallback: distance via `RouteHelper.distanceMeters()`
-    (Haversine), duration omitted (`null`) — no average-speed guess.
-  - Formatting: meters <1km (e.g. "650 m"), km with 1 decimal otherwise
-    (e.g. "3.2 km"); minutes <60 (e.g. "8 min"), else "1h 15m".
-- **NOTIF-DEEPLINK fixed** — new `ui/navigation/DeepLinkHandler.kt` (driver,
-  same pattern as rider's DEEP-1); `MainActivity.onNewIntent()` emits,
-  `AppNavGraph` collects and navigates when logged in. Cold-start path
-  (existing `deepLinkRoute` param) unchanged.
-- **KEYSTORE-CRASH fixed** — `SessionManager.init()` (driver) wraps
-  `EncryptedSharedPreferences.create()` in try/catch; on failure wipes the
-  stale prefs file + `MasterKey.DEFAULT_MASTER_KEY_ALIAS` from
-  `AndroidKeyStore` and recreates with a fresh key (forces one-time re-login).
-
-### Earlier completed (prior session, driver route/marker pass)
-- Route caching/cooldown/destination-binding redesign lives entirely in
+- TOKEN-RACE fixed — `Apiclient.kt` `TokenAuthenticator` now uses `Mutex` +
+  `withLock`, same pattern as driver's `AuthInterceptor`.
+- Teardrop `pinDrawable()` markers for pickup/dropoff in `Homescreen.kt` and
+  `Activetripscreen.kt`. Driver/user position markers stay `circleDrawable`.
+- Route caching/cooldown/destination-binding redesign moved entirely into
   `Activetripviewmodel.kt` (`cachedDestLat/Lng`, `lastOsrmFailureMs`, 5-min
-  `OSRM_COOLDOWN_MS`); immediate route draw on `loadTrip()`; `startTrip()`
-  resets cache for the dropoff leg.
-- Teardrop `pinDrawable()` markers for pickup/dropoff/"Tujuan"; driver's own
-  position marker stays `circleDrawable`.
-- CONSCRYPT-PLACEMENT resolved for both apps — `Security.insertProviderAt`
-  moved to Application-level `onCreate()`.
+  `OSRM_COOLDOWN_MS`) — mirrors driver's design exactly.
+- Distance/ETA info card on `Activetripscreen.kt` — `OsrmRouteHelper.fetchRoute()`
+  now returns `RouteResult(points, distanceMeters, durationSeconds)`;
+  `fetchRouteWithFallback` removed, fallback logic now lives in the ViewModel.
 
-### Earlier completed (background, unchanged)
-NavGraph `observeForever` leak fix, missing index on
-`trips.notified_driver_id`, `search_path` security fix on 5 DB functions,
-DEEP-1 buffer fix (rider), rider route-line race fix
-(`combine(_driverLocation, _trip)` + `routePoints` LaunchedEffect key),
-`PollingLocationTracker` 15s→5s, VIBRATE permission fix, Conscrypt+OkHttp TLS
-fix for rider OSRM calls.
+## ✅ Driver app — bug fix + UX pass
+
+- **NEGOT-RECOVER fixed** — `MapViewModel.recoverActiveTrip()` previously sent
+  the driver to `IncomingTrips` when recovering a trip where the rider had
+  countered (`status=offered`, `last_offer_by=rider`). Now correctly routes to
+  `CounterDecisionScreen` with the real `driver_counter_count` from the trip.
+- **Badge on "Lihat Perjalanan" FAB — applied and confirmed.** `MapViewModel`
+  exposes `incomingTripCount`, polled every 15s via `getIncomingTrips()` while
+  online; `MapScreen.kt` `BadgedBox` wrapper applied.
+
+## ✅ UI polish — padding & sheet height — applied and confirmed
+
+- FAB-to-sheet gap reduced in `Homescreen.kt`, rider `Activetripscreen.kt`,
+  driver `Activetripscreen.kt`.
+- `minSheetHeight` increased on both ActiveTrip screens (rider + driver).
 
 ---
 
-## 🔴 Next Up — Rider app pass
+## 🔴 Pending — FCM cold-start navigation (deferred for later)
 
-Apply the same patterns just finished for the driver app to the rider "Antar"
-app. All design decisions below are final (carried over from the driver pass).
+Root cause confirmed: tapping a `new_trip` / `offer_accepted` notification only
+navigates correctly to `IncomingTrips`/`ActiveTrip` when that screen is already
+in the saved back stack. On a true cold start from `Map`, navigation silently
+fails — `LaunchedEffect(deepLinkRoute)` in `AppNavGraph` fires before NavHost
+has initialised its first destination.
 
-1. **Route caching/marker redesign** — `Antar/.../ui/trip/Activetripviewmodel.kt`:
-   move cache/cooldown/destination-binding entirely into the ViewModel,
-   following driver's `Activetripviewmodel.kt` (`cachedDestLat/Lng`,
-   `lastOsrmFailureMs`, `OSRM_COOLDOWN_MS`). Rider already has the
-   `combine(_driverLocation, _trip)` fix from a prior session — check whether
-   destination-binding is *also* needed for pickup→dropoff leg transitions.
-2. **Teardrop `pinDrawable()` markers** for rider's pickup/dropoff/"Tujuan" in
-   `HomeScreen.kt` and `ActiveTripScreen.kt`. Driver-position and own-location
-   markers stay `circleDrawable` — same scope as driver app.
-3. **Distance/ETA info card** — port the now-finalized driver design
-   (`RouteResult`, top-left card, formatting rules, straight-line-omits-duration)
-   to `Antar/.../ui/trip/Osrmroutehelper.kt` + `Activetripviewmodel.kt` +
-   `Activetripscreen.kt`. `OsrmRouteHelper.fetchRoute()` needs the same
-   `RouteResult` return-type change as the driver's `RouteHelper`.
-4. **TOKEN-RACE** (bundle into this pass — same file area as #1/#3):
-   `Antar/.../data/remote/Apiclient.kt` `TokenAuthenticator` uses
-   `@Volatile isRefreshing`, letting two simultaneous 401s both pass the guard.
-   Replace with `Mutex` + `withLock`, following driver's
-   `RetrofitClient.AuthInterceptor` exactly.
+Fix designed but not yet applied/retested:
+- `DeepLinkHandler.kt` (driver) — route cold-start emissions through it too
+  (currently only used for the backgrounded-not-killed path).
+- `MainActivity.kt` — emit to `DeepLinkHandler` in `onCreate()` instead of
+  passing `deepLinkRoute` directly to `AppNavGraph`.
+- `AppNavGraph.kt` — remove the `deepLinkRoute` param + its `LaunchedEffect`;
+  in the existing `DeepLinkHandler.events.collect` block, wait on
+  `navController.currentBackStackEntryFlow.first { it != null }` before
+  navigating, then call `DeepLinkHandler.consume()`.
+
+When resumed: apply all three files together, then retest a notification tap
+from a fully killed state where the last screen was `Map` (not
+`IncomingTrips`) — confirm on Android 11 and at least one other version.
+
+---
+
+## 🔵 Discussed, design pending — next session
+
+These were raised but intentionally deferred for a dedicated design pass:
+
+1. **Rider — driver review/accept screen.** Instead of auto-assigning the
+   first offer, show the rider a profile card (photo, name, phone, vehicle,
+   rating) with Accept/Reject before moving to Negotiation. Reject reuses the
+   existing `POST /trips/:id/reject` (resets to `requested`, no new endpoint).
+   Needs `TripResponse` (rider's `tripSelect` in
+   `Antar-Server/internal/rider/handler_trips.go`) enriched with driver
+   avatar/vehicle/rating columns — join `driver_vehicles` + driver rating
+   fields. New screen: `Antar/.../ui/trip/` between Searching and Negotiation.
+2. **Driver — decline a trip request.** Client-side only for v1: add a
+   decline action on the `IncomingTrips` trip card, track declined IDs in an
+   in-memory `Set<String>` in `IncomingTripsViewModel`, filter from the polled
+   list. Resets on app kill — acceptable for v1. No server change.
+3. **Suggested pairing with #2** — "Withdraw Offer" button on
+   `WaitingForRiderScreen` (driver) calling the existing cancel endpoint, so a
+   driver isn't stuck waiting indefinitely on a slow rider.
 
 ---
 
@@ -81,23 +87,12 @@ app. All design decisions below are final (carried over from the driver pass).
 
 ### 🟡 Low — Silent errors / best practice
 
-**LOCALE-DATE-PARSE (Driver app `EarningsScreen.kt`)**
-`dayAbbrev()` and `dayFullName()` use `Locale.getDefault()` for ISO date parsing
-with a `!!` force-unwrap. On devices with Eastern Arabic numeral locales,
-`parse()` returns null → NPE silently caught → empty bar chart day labels.
-- File: `DriverAntar/.../ui/earnings/Earningsscreen.kt` → `dayAbbrev()`,
-  `dayFullName()`
-- Fix: change `Locale.getDefault()` to `Locale.US` (pattern already used in
-  `TripHistoryScreen.kt` `formatDate()`)
+*(LOCALE-DATE-PARSE and DROPOFF-GUARD completed last session — see
+ANTAR_DONE.md. Nothing currently in this bucket.)*
 
 ---
 
 ## ⏳ Pending (Do Last)
-
-**DROPOFF-GUARD** — Driver `ActiveTripViewModel.kt`: `canComplete` returns `true`
-when `dropoff_lat == 0.0` on transport trips.
-> ⚠️ Fix only after verifying `dropoff_lat` is reliably populated in all
-> real-device scenarios.
 
 **SEC-6** — Admin routes accept any valid driver/rider JWT. Create `AdminOnly()`
 middleware + `admin_users` table.

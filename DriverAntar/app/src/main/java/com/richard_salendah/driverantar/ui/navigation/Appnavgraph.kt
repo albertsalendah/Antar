@@ -42,12 +42,12 @@ import com.richard_salendah.driverantar.ui.vehicle.AddVehicleScreen
 import com.richard_salendah.driverantar.ui.vehicle.VehicleViewModel
 import com.richard_salendah.driverantar.utils.SessionManager
 import com.richard_salendah.driverantar.ui.service.LocationService
+import kotlinx.coroutines.flow.first
 
 @Composable
 fun AppNavGraph(
     navController: NavHostController,
     repository: DriverRepository,
-    deepLinkRoute: String? = null
 ) {
     val startDestination = if (SessionManager.isLoggedIn) Screen.Map.route
     else Screen.Login.route
@@ -55,9 +55,16 @@ fun AppNavGraph(
     val authViewModel = remember { AuthViewModel(repository) }
     val mapViewModel  = remember { MapViewModel(repository) }
 
-    LaunchedEffect(deepLinkRoute) {
-        if (deepLinkRoute != null && SessionManager.isLoggedIn) {
-            navController.navigate(deepLinkRoute) { launchSingleTop = true }
+    LaunchedEffect(navController) {
+        DeepLinkHandler.events.collect { route ->
+            if (SessionManager.isLoggedIn) {
+                // Wait for NavHost to initialise its first destination before navigating.
+                // Without this, cold-start navigation silently fails on some Android versions
+                // because the back stack is empty when the LaunchedEffect first fires.
+                navController.currentBackStackEntryFlow.first { true }
+                navController.navigate(route) { launchSingleTop = true }
+                DeepLinkHandler.consume()
+            }
         }
     }
 

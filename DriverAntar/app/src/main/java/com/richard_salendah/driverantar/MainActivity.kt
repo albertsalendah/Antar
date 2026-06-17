@@ -92,13 +92,12 @@ class MainActivity : ComponentActivity() {
             userAgentValue = packageName
         }
 
-        val deepLinkRoute  = intent.getStringExtra(EXTRA_NAVIGATE_TO)
         val sessionExpired = intent.getBooleanExtra("session_expired", false)
+        intent.getStringExtra(EXTRA_NAVIGATE_TO)?.let { DeepLinkHandler.emit(it) }
 
         setContent {
             MaterialTheme {
                 val navController   = rememberNavController()
-                var pendingDeepLink by remember { mutableStateOf(deepLinkRoute) }
 
                 LaunchedEffect(sessionExpired) {
                     if (sessionExpired) {
@@ -111,7 +110,6 @@ class MainActivity : ComponentActivity() {
                 AppNavGraph(
                     navController = navController,
                     repository    = DriverRepository(RetrofitClient.instance),
-                    deepLinkRoute = pendingDeepLink?.also { pendingDeepLink = null }
                 )
             }
         }

@@ -65,7 +65,7 @@ fun ActiveTripScreen(
     val density        = LocalDensity.current
 
     val maxSheetHeight: Dp = screenHeightDp * 0.75f
-    val minSheetHeight: Dp = 200.dp
+    val minSheetHeight: Dp = 320.dp
 
     val uiState        = viewModel.uiState
     val trip           = viewModel.trip

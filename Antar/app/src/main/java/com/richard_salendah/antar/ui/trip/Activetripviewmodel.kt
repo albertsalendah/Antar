@@ -44,7 +44,6 @@ class ActiveTripViewModel(app: Application) : AndroidViewModel(app) {
         private set
 
     // CONN-5: tracks when the last status update was received (millis).
-    // The screen observes this and shows a refresh hint after 30 s of silence.
     var lastStatusUpdateMs by mutableStateOf(System.currentTimeMillis())
         private set
 
@@ -53,16 +52,29 @@ class ActiveTripViewModel(app: Application) : AndroidViewModel(app) {
     private val _driverLocation = MutableStateFlow<DriverLocation?>(null)
     val driverLocation: StateFlow<DriverLocation?> = _driverLocation.asStateFlow()
 
-    // Internal StateFlow for trip so we can combine it with driverLocation.
-    // The public `trip` compose state is kept in sync with this.
+    // Internal StateFlow for trip — combined with driverLocation so fetchRouteIfNeeded
+    // triggers correctly regardless of which arrives first.
     private val _trip = MutableStateFlow<TripResponse?>(null)
 
     // ── Route state ───────────────────────────────────────────────────────────
-    var routePoints by mutableStateOf<List<GeoPoint>>(emptyList())
-        private set
+    var routePoints          by mutableStateOf<List<GeoPoint>>(emptyList()); private set
+    var routeDistanceMeters  by mutableStateOf<Double?>(null);               private set
+    var routeDurationSeconds by mutableStateOf<Double?>(null);               private set
 
     private var lastRouteFetchLat = 0.0
     private var lastRouteFetchLng = 0.0
+
+    // Destination the current routePoints correspond to — invalidates the
+    // cached route when the leg changes (pickup → dropoff after in_progress)
+    // so a stale route is never shown anchored to the wrong destination.
+    // This means fetchRouteIfNeeded never needs a manual lastRouteFetch reset
+    // on leg transitions — destination mismatch forces the refetch automatically.
+    private var cachedDestLat = 0.0
+    private var cachedDestLng = 0.0
+
+    // Timestamp of the last OSRM failure — avoids hammering OSRM while it's
+    // down. Reset on success or on connectivity restoration (retryRoute).
+    private var lastOsrmFailureMs = 0L
 
     // ── Status tracking ───────────────────────────────────────────────────────
     private var statusChannel: RealtimeChannel? = null
@@ -96,7 +108,7 @@ class ActiveTripViewModel(app: Application) : AndroidViewModel(app) {
                         Log.e(TAG, "loadTrip: response OK but data is null")
                         return@runCatching
                     }
-                    trip  = t
+                    trip        = t
                     _trip.value = t
                     lastStatusUpdateMs = System.currentTimeMillis()
                     Log.d(TAG, "loadTrip: success status=${t.status} " +
@@ -139,15 +151,9 @@ class ActiveTripViewModel(app: Application) : AndroidViewModel(app) {
     // ── Route fetching ────────────────────────────────────────────────────────
 
     /**
-     * TODO-7 fix: observes BOTH _driverLocation and _trip via combine so a route
-     * fetch is triggered whenever either changes.
-     *
-     * Previous bug: observeLocationForRouting() gated on `trip` (Compose state) being
-     * non-null at collection time. Since trip loads asynchronously, the first location
-     * emission often arrived before loadTrip() finished — trip was null, the call was
-     * skipped, and no subsequent trigger re-ran fetchRouteIfNeeded for that location.
-     *
-     * Fix: combine(_driverLocation, _trip) so any change to either restarts the check.
+     * Observes BOTH [_driverLocation] and [_trip] via [combine] so a route
+     * fetch is triggered whenever either changes — covers the case where trip
+     * loads after the first location emission and vice versa.
      */
     private fun observeLocationForRouting() {
         combine(_driverLocation, _trip) { loc, t -> Pair(loc, t) }
@@ -172,17 +178,10 @@ class ActiveTripViewModel(app: Application) : AndroidViewModel(app) {
         driverLng: Double,
         t: TripResponse,
     ) {
-        val moved = OsrmRouteHelper.distanceMeters(
-            driverLat, driverLng,
-            lastRouteFetchLat, lastRouteFetchLng,
-        )
-
-        if (moved < 50.0 && routePoints.isNotEmpty()) {
-            Log.v(TAG, "fetchRouteIfNeeded: skipped — driver moved only ${moved.toInt()}m " +
-                    "and route already drawn (${routePoints.size} points)")
-            return
-        }
-
+        // Compute destination FIRST — before the early-return check.
+        // When status flips agreed → in_progress, cachedDest (still pickup)
+        // won't match the new dest (dropoff), forcing a refetch even if the
+        // driver hasn't moved 50 m. No manual reset needed on leg transition.
         val (destLat, destLng) = when (t.status) {
             "agreed", "arrived" -> {
                 Log.d(TAG, "fetchRouteIfNeeded: routing to PICKUP (${t.pickupLat},${t.pickupLng})")
@@ -210,41 +209,67 @@ class ActiveTripViewModel(app: Application) : AndroidViewModel(app) {
             return
         }
 
+        val moved = OsrmRouteHelper.distanceMeters(
+            driverLat, driverLng, lastRouteFetchLat, lastRouteFetchLng
+        )
+
+        // Skip only when SAME destination AND driver barely moved AND route exists.
+        // Destination mismatch (leg transition) bypasses this check automatically.
+        if (moved < 50.0 && routePoints.isNotEmpty()
+            && cachedDestLat == destLat && cachedDestLng == destLng) {
+            Log.v(TAG, "fetchRouteIfNeeded: skipped — driver moved only ${moved.toInt()}m " +
+                    "and route already drawn (${routePoints.size} points)")
+            return
+        }
+
         lastRouteFetchLat = driverLat
         lastRouteFetchLng = driverLng
 
         viewModelScope.launch {
-            Log.d(TAG, "fetchRouteIfNeeded: requesting route " +
-                    "origin=($driverLat,$driverLng) dest=($destLat,$destLng) " +
-                    "movedSinceLast=${moved.toInt()}m")
+            val now            = System.currentTimeMillis()
+            val cooldownActive = now - lastOsrmFailureMs < OSRM_COOLDOWN_MS
 
-            // TODO-7: use fetchRouteWithFallback so a straight line is drawn when
-            // OSRM has no road data (common in Talaud). Returns empty list only if
-            // either origin or destination is 0,0.
-            val pts = OsrmRouteHelper.fetchRouteWithFallback(
-                driverLat, driverLng, destLat, destLng
-            )
+            val fresh = if (cooldownActive) null
+            else OsrmRouteHelper.fetchRoute(driverLat, driverLng, destLat, destLng)
 
-            if (pts.isNotEmpty()) {
-                routePoints = pts
-                val type = if (pts.size == 2) "straight-line" else "road"
-                Log.d(TAG, "fetchRouteIfNeeded: route drawn — $type, ${pts.size} points")
-            } else {
-                Log.w(TAG, "fetchRouteIfNeeded: fetchRouteWithFallback returned empty — not drawing")
+            when {
+                fresh != null -> {
+                    // OSRM succeeded — update everything
+                    routePoints          = fresh.points
+                    routeDistanceMeters  = fresh.distanceMeters
+                    routeDurationSeconds = fresh.durationSeconds
+                    cachedDestLat        = destLat
+                    cachedDestLng        = destLng
+                    lastOsrmFailureMs    = 0L
+                    val type = if (fresh.points.size == 2) "straight-line" else "road"
+                    Log.d(TAG, "fetchRouteIfNeeded: route drawn — $type, " +
+                            "${fresh.points.size} points, ~${fresh.distanceMeters.toInt()}m")
+                }
+                routePoints.isNotEmpty()
+                        && cachedDestLat == destLat && cachedDestLng == destLng -> {
+                    // OSRM failed but cached route still valid for this leg — keep it
+                    if (!cooldownActive) lastOsrmFailureMs = now
+                    Log.d(TAG, "fetchRouteIfNeeded: OSRM failed — keeping cached route")
+                }
+                else -> {
+                    // No valid cached route — draw straight-line fallback.
+                    // Duration is omitted (null): no reliable average-speed estimate.
+                    routePoints = listOf(
+                        GeoPoint(driverLat, driverLng),
+                        GeoPoint(destLat,   destLng),
+                    )
+                    routeDistanceMeters  = OsrmRouteHelper.distanceMeters(
+                        driverLat, driverLng, destLat, destLng
+                    )
+                    routeDurationSeconds = null
+                    cachedDestLat        = destLat
+                    cachedDestLng        = destLng
+                    if (!cooldownActive) lastOsrmFailureMs = now
+                    Log.w(TAG, "fetchRouteIfNeeded: OSRM unavailable — straight-line fallback " +
+                            "($driverLat,$driverLng) → ($destLat,$destLng)")
+                }
             }
         }
-    }
-
-    // CONN-4: called by the screen when connectivity is restored.
-    // Resets the last fetch point so fetchRouteIfNeeded triggers a fresh fetch
-    // on the next location emission.
-    fun retryRoute() {
-        Log.d(TAG, "retryRoute: connectivity restored — resetting fetch state")
-        lastRouteFetchLat = 0.0
-        lastRouteFetchLng = 0.0
-        val loc = _driverLocation.value ?: return
-        val t   = _trip.value ?: return
-        fetchRouteIfNeeded(loc.lat, loc.lng, t)
     }
 
     // ── Trip status Realtime ──────────────────────────────────────────────────
@@ -262,18 +287,14 @@ class ActiveTripViewModel(app: Application) : AndroidViewModel(app) {
                     val resp = api.getTrip(tripId)
                     if (resp.isSuccessful) {
                         val t = resp.body()?.data ?: return@onEach
-                        trip = t
+                        trip        = t
                         _trip.value = t
                         lastStatusUpdateMs      = System.currentTimeMillis()
                         consecutivePollFailures = 0
                         connectionLost          = false
                         Log.d(TAG, "Realtime: trip refreshed status=${t.status}")
-
-                        if (t.status == "in_progress") {
-                            Log.d(TAG, "Realtime: in_progress — resetting route fetch state")
-                            lastRouteFetchLat = 0.0
-                            lastRouteFetchLng = 0.0
-                        }
+                        // Leg transition (agreed → in_progress) is handled automatically
+                        // by destination-binding in fetchRouteIfNeeded — no manual reset.
                         if (t.status == "completed") { teardown(); onCompleted() }
                     } else {
                         val status = action.record["status"]?.jsonPrimitive?.content
@@ -300,7 +321,7 @@ class ActiveTripViewModel(app: Application) : AndroidViewModel(app) {
                     val resp = api.getTrip(tripId)
                     if (resp.isSuccessful) {
                         val t = resp.body()?.data ?: return@runCatching false
-                        trip = t
+                        trip        = t
                         _trip.value = t
                         lastStatusUpdateMs      = System.currentTimeMillis()
                         consecutivePollFailures = 0
@@ -329,6 +350,21 @@ class ActiveTripViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    // CONN-4: called by the screen when connectivity is restored.
+    // Resets all route fetch state — including the OSRM cooldown — so a fresh
+    // OSRM request fires on the next location emission.
+    fun retryRoute() {
+        Log.d(TAG, "retryRoute: connectivity restored — resetting fetch state")
+        lastRouteFetchLat = 0.0
+        lastRouteFetchLng = 0.0
+        cachedDestLat     = 0.0
+        cachedDestLng     = 0.0
+        lastOsrmFailureMs = 0L
+        val loc = _driverLocation.value ?: return
+        val t   = _trip.value ?: return
+        fetchRouteIfNeeded(loc.lat, loc.lng, t)
+    }
+
     // ── Teardown ──────────────────────────────────────────────────────────────
 
     private fun teardown() {
@@ -344,4 +380,8 @@ class ActiveTripViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     override fun onCleared() { super.onCleared(); teardown() }
+
+    companion object {
+        private const val OSRM_COOLDOWN_MS = 5 * 60_000L
+    }
 }

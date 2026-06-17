@@ -16,10 +16,14 @@ import kotlinx.coroutines.flow.asSharedFlow
  * extraBufferCapacity = 4 mirrors the rider app's DeepLinkHandler (DEEP-1 fix).
  */
 object DeepLinkHandler {
-    private val _events = MutableSharedFlow<String>(extraBufferCapacity = 4)
+    private val _events = MutableSharedFlow<String>(replay = 1, extraBufferCapacity = 4)
     val events: SharedFlow<String> = _events.asSharedFlow()
 
-    fun emit(route: String) {
-        _events.tryEmit(route)
-    }
+    fun emit(route: String) { _events.tryEmit(route) }
+
+    /**
+     * Reset the replay cache after consuming an event so stale routes are not
+     * re-delivered to collectors that subscribe later (e.g. after a back-nav).
+     */
+    fun consume() { _events.resetReplayCache() }
 }

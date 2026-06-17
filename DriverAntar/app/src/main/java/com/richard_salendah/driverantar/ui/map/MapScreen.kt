@@ -29,6 +29,7 @@ import org.osmdroid.util.GeoPoint
 import org.osmdroid.views.MapView
 import org.osmdroid.views.overlay.Marker
 import androidx.core.graphics.createBitmap
+import com.richard_salendah.driverantar.ui.trip.IncomingTripsViewModel
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -182,11 +183,19 @@ fun MapScreen(
         },
         floatingActionButton = {
             if (viewModel.isOnline) {
-                ExtendedFloatingActionButton(
-                    onClick = onOpenIncomingTrips,
-                    text    = { Text("Lihat Perjalanan") },
-                    icon    = {}
-                )
+                BadgedBox(
+                    badge = {
+                        if (viewModel.incomingTripCount > 0) {
+                            Badge { Text("${viewModel.incomingTripCount}") }
+                        }
+                    }
+                ) {
+                    ExtendedFloatingActionButton(
+                        onClick = onOpenIncomingTrips,
+                        text    = { Text("Lihat Perjalanan") },
+                        icon    = {}
+                    )
+                }
             }
         }
     ) { padding ->
@@ -199,7 +208,7 @@ fun MapScreen(
             } else {
                 android.graphics.Color.parseColor("#757575") // Slick Gray for Offline
             }
-            pinDrawable(context, colorInt = pinColor, sizeDp = 30)
+            pinDrawable(context, 0xFF1B6CA8.toInt(), sizeDp = 30)
         }
 
         Box(
@@ -340,7 +349,7 @@ fun MapScreen(
                         .align(Alignment.BottomEnd)
                         .padding(
                             end    = 16.dp,
-                            bottom = if (viewModel.isOnline) 80.dp else 16.dp
+                            bottom = if (viewModel.isOnline) 76.dp else 16.dp
                         ),
                     containerColor = MaterialTheme.colorScheme.surface,
                     contentColor   = MaterialTheme.colorScheme.primary

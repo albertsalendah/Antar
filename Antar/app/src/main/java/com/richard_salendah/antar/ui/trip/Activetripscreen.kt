@@ -18,6 +18,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
@@ -74,6 +75,7 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import com.richard_salendah.antar.data.model.TripResponse
 import com.richard_salendah.antar.ui.common.OfflineBanner
 import com.richard_salendah.antar.ui.common.rememberConnectivityState
+import kotlin.math.roundToInt
 import kotlinx.coroutines.delay
 import org.osmdroid.config.Configuration
 import org.osmdroid.tileprovider.tilesource.TileSourceFactory
@@ -103,16 +105,18 @@ fun ActiveTripScreen(
     val density        = LocalDensity.current
 
     val maxSheetHeight: Dp = screenHeightDp * 0.75f
-    val minSheetHeight: Dp = 195.dp
+    val minSheetHeight: Dp = 280.dp
 
     var mapView        by remember { mutableStateOf<MapView?>(null) }
     var sheetExpansion by remember { mutableFloatStateOf(0f) }
     var dragAccum      by remember { mutableFloatStateOf(0f) }
     val sheetHeight    = minSheetHeight + (maxSheetHeight - minSheetHeight) * sheetExpansion
 
-    val trip           = viewModel.trip
-    val driverLocation by viewModel.driverLocation.collectAsState()
-    val routePoints    = viewModel.routePoints
+    val trip                 = viewModel.trip
+    val driverLocation       by viewModel.driverLocation.collectAsState()
+    val routePoints          = viewModel.routePoints
+    val routeDistanceMeters  = viewModel.routeDistanceMeters
+    val routeDurationSeconds = viewModel.routeDurationSeconds
 
     // CONN-3: observe connectivity state to show OfflineBanner and trigger retryRoute
     val isOnline by rememberConnectivityState()
@@ -179,6 +183,7 @@ fun ActiveTripScreen(
 
     Box(modifier = Modifier.fillMaxSize()) {
 
+        // ── Full-screen map ───────────────────────────────────────────────────
         AndroidView(
             factory = { ctx ->
                 MapView(ctx).apply {
@@ -192,6 +197,7 @@ fun ActiveTripScreen(
             modifier = Modifier.fillMaxSize(),
         )
 
+        // ── Recenter FAB ──────────────────────────────────────────────────────
         if (driverLocation != null) {
             FloatingActionButton(
                 onClick = {
@@ -205,14 +211,62 @@ fun ActiveTripScreen(
                 modifier       = Modifier
                     .align(Alignment.BottomEnd)
                     .navigationBarsPadding()
-                    .padding(bottom = sheetHeight + 12.dp, end = 16.dp)
+                    .padding(bottom = sheetHeight-40.dp, end = 16.dp)
                     .size(44.dp),
             ) {
                 Icon(Icons.Default.MyLocation, "Ikuti driver", modifier = Modifier.size(22.dp))
             }
         }
 
+        // ── Distance/ETA info card ────────────────────────────────────────────
+        // Shown for agreed and in_progress; hidden on arrived (driver is waiting).
+        if (routeDistanceMeters != null &&
+            (trip?.status == "agreed" || trip?.status == "in_progress")) {
+            Surface(
+                modifier = Modifier
+                    .align(Alignment.TopStart)
+                    .statusBarsPadding()
+                    .padding(12.dp),
+                shape           = RoundedCornerShape(12.dp),
+                color           = Color.White,
+                shadowElevation = 4.dp,
+            ) {
+                Row(
+                    modifier              = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                    verticalAlignment     = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    Icon(
+                        Icons.Default.LocationOn, null,
+                        tint     = PrimaryBlue,
+                        modifier = Modifier.size(16.dp),
+                    )
+                    Text(
+                        formatDistance(routeDistanceMeters),
+                        style = MaterialTheme.typography.labelMedium.copy(
+                            fontWeight = FontWeight.SemiBold,
+                        ),
+                    )
+                    routeDurationSeconds?.let { duration ->
+                        Text(
+                            "•",
+                            color = Color(0xFFBBBBBB),
+                            style = MaterialTheme.typography.labelMedium,
+                        )
+                        Text(
+                            formatDuration(duration),
+                            style = MaterialTheme.typography.labelMedium.copy(
+                                fontWeight = FontWeight.SemiBold,
+                            ),
+                        )
+                    }
+                }
+            }
+        }
+
         // ── Draggable bottom sheet ────────────────────────────────────────────
+        var dragAccumSheet by remember { mutableFloatStateOf(0f) }
+
         Box(
             modifier = Modifier
                 .fillMaxWidth()
@@ -292,18 +346,20 @@ fun ActiveTripScreen(
                         .padding(top = 10.dp)
                         .pointerInput(Unit) {
                             detectVerticalDragGestures(
-                                onDragStart = { dragAccum = 0f },
-                                onDragEnd   = {
-                                    sheetExpansion = if (sheetExpansion > 0.4f) 1f else 0f
+                                onDragStart  = { dragAccumSheet = 0f },
+                                onDragEnd    = {
+                                    sheetExpansion =
+                                        if (sheetExpansion > 0.4f) 1f else 0f
                                 },
                                 onVerticalDrag = { _, delta ->
-                                    dragAccum += delta
+                                    dragAccumSheet += delta
                                     val maxPx = with(density) {
                                         (maxSheetHeight - minSheetHeight).toPx()
                                     }
                                     sheetExpansion =
-                                        (sheetExpansion - dragAccum / maxPx).coerceIn(0f, 1f)
-                                    dragAccum = 0f
+                                        (sheetExpansion - dragAccumSheet / maxPx)
+                                            .coerceIn(0f, 1f)
+                                    dragAccumSheet = 0f
                                 },
                             )
                         },
@@ -612,18 +668,20 @@ private fun updateOverlays(
         }
     }
 
+    // Pickup pin — teardrop, hidden when rider is already in the vehicle
     if (trip.pickupLat != 0.0 && status != "in_progress") {
         Marker(map).apply {
             id       = "pickup"
             position = GeoPoint(trip.pickupLat, trip.pickupLng)
             title    = "Penjemputan"
             snippet  = trip.pickupAddress
-            icon     = circleDrawable(map.context, 0xFF1B6CA8.toInt(), 30)
+            icon     = pinDrawable(map.context, 0xFF1B6CA8.toInt(), 30)
             setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_BOTTOM)
             map.overlays.add(this)
         }
     }
 
+    // Dropoff pin — teardrop, shown only when in_progress on transport trips
     if (status == "in_progress" &&
         trip.tripType == "transport" &&
         trip.dropoffLat != 0.0) {
@@ -632,12 +690,13 @@ private fun updateOverlays(
             position = GeoPoint(trip.dropoffLat, trip.dropoffLng)
             title    = "Tujuan"
             snippet  = trip.dropoffAddress ?: ""
-            icon     = circleDrawable(map.context, 0xFFE53935.toInt(), 30)
+            icon     = pinDrawable(map.context, 0xFFE53935.toInt(), 30)
             setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_BOTTOM)
             map.overlays.add(this)
         }
     }
 
+    // Driver pin — circle, moving position marker
     driverLoc?.let { loc ->
         val (pinColor, pinTitle) = when (status) {
             "arrived"     -> Pair(0xFFF57F17.toInt(), "Driver menunggu Anda")
@@ -657,6 +716,8 @@ private fun updateOverlays(
     map.invalidate()
 }
 
+// ── Marker drawables ──────────────────────────────────────────────────────────
+
 private fun circleDrawable(
     context:  android.content.Context,
     colorInt: Int,
@@ -673,6 +734,46 @@ private fun circleDrawable(
             style       = Paint.Style.STROKE
             strokeWidth = px * 0.18f
         })
+    return android.graphics.drawable.BitmapDrawable(context.resources, bmp)
+}
+
+/**
+ * Teardrop map-pin for static pickup and dropoff markers.
+ * Anchored at ANCHOR_CENTER / ANCHOR_BOTTOM (the tip of the tail).
+ * Moving position markers (driver) use [circleDrawable] instead.
+ */
+private fun pinDrawable(
+    context:  android.content.Context,
+    colorInt: Int,
+    sizeDp:   Int,
+): android.graphics.drawable.BitmapDrawable {
+    val density = context.resources.displayMetrics.density
+    val w  = (sizeDp * density).coerceAtLeast(8f)
+    val h  = w * 1.35f
+    val cx = w / 2f
+    val r  = w / 2f
+
+    val bmp    = Bitmap.createBitmap(w.toInt(), h.toInt(), Bitmap.Config.ARGB_8888)
+    val canvas = Canvas(bmp)
+    val fill   = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = colorInt; style = Paint.Style.FILL
+    }
+
+    canvas.drawCircle(cx, r, r, fill)
+
+    val tail = android.graphics.Path().apply {
+        moveTo(cx - r * 0.78f, r + r * 0.55f)
+        lineTo(cx + r * 0.78f, r + r * 0.55f)
+        lineTo(cx, h)
+        close()
+    }
+    canvas.drawPath(tail, fill)
+
+    val holePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = android.graphics.Color.WHITE; style = Paint.Style.FILL
+    }
+    canvas.drawCircle(cx, r, r * 0.42f, holePaint)
+
     return android.graphics.drawable.BitmapDrawable(context.resources, bmp)
 }
 
@@ -777,5 +878,20 @@ private fun DetailRow(
     }
 }
 
+// ── Formatters ────────────────────────────────────────────────────────────────
+
 private fun formatRupiah(amount: Double) =
     "Rp " + NumberFormat.getNumberInstance(Locale("id", "ID")).format(amount.toLong())
+
+/** "650 m" below 1 km, "3.2 km" at or above. */
+private fun formatDistance(meters: Double): String = when {
+    meters < 1_000 -> "${meters.roundToInt()} m"
+    else            -> "%.1f km".format(meters / 1_000)
+}
+
+/** "8 min" below an hour, "1h 15m" at or above. */
+private fun formatDuration(seconds: Double): String {
+    val totalMinutes = (seconds / 60).roundToInt()
+    return if (totalMinutes < 60) "$totalMinutes min"
+    else "${totalMinutes / 60}h ${totalMinutes % 60}m"
+}
