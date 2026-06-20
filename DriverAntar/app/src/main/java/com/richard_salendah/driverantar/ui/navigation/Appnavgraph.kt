@@ -58,22 +58,9 @@ fun AppNavGraph(
     LaunchedEffect(navController) {
         DeepLinkHandler.events.collect { route ->
             if (SessionManager.isLoggedIn) {
-                // Wait for NavHost to initialise its first destination before navigating.
-                // Without this, cold-start navigation silently fails on some Android versions
-                // because the back stack is empty when the LaunchedEffect first fires.
                 navController.currentBackStackEntryFlow.first { true }
                 navController.navigate(route) { launchSingleTop = true }
                 DeepLinkHandler.consume()
-            }
-        }
-    }
-
-    // NOTIF-DEEPLINK: handles FCM taps while the app is backgrounded but not
-    // killed — onNewIntent() emits here since onCreate's deepLinkRoute won't re-fire.
-    LaunchedEffect(navController) {
-        DeepLinkHandler.events.collect { route ->
-            if (SessionManager.isLoggedIn) {
-                navController.navigate(route) { launchSingleTop = true }
             }
         }
     }

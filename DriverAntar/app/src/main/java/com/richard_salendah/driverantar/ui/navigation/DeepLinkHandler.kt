@@ -5,13 +5,11 @@ import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.asSharedFlow
 
 /**
- * Bridges FCM notification taps received via MainActivity.onNewIntent()
- * (app backgrounded, not killed) to AppNavGraph, which observes [events]
- * and navigates.
- *
- * Cold-start taps are handled separately via MainActivity's existing
- * deepLinkRoute param to AppNavGraph — this handler only covers the
- * onNewIntent path (NOTIF-DEEPLINK).
+ * Bridges FCM notification taps to AppNavGraph, which observes [events]
+ * and navigates. Both cold-start (MainActivity.onCreate) and
+ * backgrounded-not-killed (onNewIntent) paths emit here — there is a
+ * single collector in AppNavGraph that waits for the NavHost backstack
+ * before navigating, so both cases are handled uniformly.
  *
  * extraBufferCapacity = 4 mirrors the rider app's DeepLinkHandler (DEEP-1 fix).
  */

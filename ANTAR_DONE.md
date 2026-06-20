@@ -1,11 +1,68 @@
 # Antar — Completed Work Log
-**Last updated:** June 2026 (rider app pass + driver bug fixes session)
+**Last updated:** June 2026 (candidate-review architecture session)
 **Do NOT paste this in new AI sessions unless debugging a regression.**
 **Reference only — tracks what has been built and fixed.**
 
 ---
 
-## This Session — Rider App Pass + Driver Bug Fixes
+## This Session — Candidate-Review Architecture (DB) + FCM Re-Investigation
+
+### Rider candidate-review / driver-approval architecture — DB migration applied
+Full design locked with Richard (see `ANTAR_TODO.md` for the complete decision
+list and remaining implementation items — server endpoints, both apps' UI are
+still pending). Migration `candidate_review_and_driver_exclusions` applied to
+project `lbiijuuugqgcfrpksilh`:
+- `trips` — new columns `candidate_driver_id uuid → driver_profiles`,
+  `candidate_approved boolean DEFAULT false`, `candidate_approved_at
+  timestamptz`. Partial index `idx_trips_candidate_driver_id` (WHERE NOT NULL).
+- New table `trip_driver_exclusions(id, trip_id, driver_id, excluded_at)` —
+  unique on `(trip_id, driver_id)`, indexed on `trip_id`, RLS enabled with a
+  service_role-only policy.
+- `app_settings.max_driver_notification_attempts = 8` (admin-panel
+  configurable; replaces the old hardcoded `5` in the cron function).
+- `notify_nearest_driver_on_insert()` rewritten — same nearest-driver search
+  (online, island, vehicle type, `ST_DWithin` radius) but now also excludes
+  drivers in `trip_driver_exclusions` for the trip and drivers currently on
+  an active trip. Sets `candidate_driver_id`/`candidate_approved=false` only —
+  no FCM, no `driver_notification_queue` insert anymore. Null candidate when
+  no eligible driver exists.
+- `process_trip_notification_timeouts()` rewritten, three sections: (A) reset
+  stale `offered` trips >10min unchanged; (B) new — candidates that timed out
+  (`candidate_approved=true`, `candidate_approved_at` >3min ago) get added to
+  exclusions, then either get a new candidate assigned or `candidate_driver_id`
+  is set to null (exhausted attempts/exclusions) — does **not** cancel the
+  trip, rider decides via the "No Driver Found" UI; (C) new — 30-min safety
+  auto-cancel for trips abandoned with no candidate at all.
+- Post-migration verification: confirmed all 3 new `trips` columns, the new
+  table, the `app_settings` row, and that `search_path` is intact on both
+  rewritten functions. `get_advisors` security check run — only pre-existing
+  warnings surfaced (none introduced by this migration); see `ANTAR_TODO.md`
+  Database/Security section for the one worth a future cleanup pass.
+
+### FCM cold-start navigation — consolidation fix applied, did not resolve it
+Found and fixed a genuine bug: `Appnavgraph.kt` had two independent
+`LaunchedEffect` blocks both collecting the same `DeepLinkHandler.events`
+`SharedFlow` — both fired on every emission since `SharedFlow` broadcasts to
+all subscribers. The second block navigated immediately with no backstack
+wait and never called `consume()`, racing ahead of the first block's wait
+logic. Consolidated into a single collector that waits on
+`navController.currentBackStackEntryFlow.first { true }` before navigating
+and calling `consume()`. Also fixed a stale docstring in `DeepLinkHandler.kt`
+referencing a `deepLinkRoute` param that no longer exists.
+**Retested by Richard — still does not navigate to `IncomingTrips` on cold
+start.** The race was real but evidently not the sole cause. Deferred again;
+see `ANTAR_TODO.md` for where to pick this back up.
+
+### Driver — decline a trip request — code delivered
+Client-side only, no server change: `declinedTripIds` set added to
+`Incomingtripsviewmodel.kt`, filtered out in `fetchTrips`, `declineTrip(tripId)`
+function added. `Icons.Default.Close` dismiss `IconButton` wired into
+`TripCard` in `Incomingtripsscreen.kt`. Pending Richard's confirmation it's
+applied before moving fully into this log.
+
+---
+
+## Previous Session — Rider App Pass + Driver Bug Fixes
 
 ### Rider App — route/marker pass (mirrors driver pattern)
 - **TOKEN-RACE fixed** — `Apiclient.kt` `TokenAuthenticator` replaced
@@ -81,6 +138,7 @@
 | expire_stale_offered_trips | NEG-TIMEOUT: process_trip_notification_timeouts() now resets offered trips back to requested after 10 min inactivity |
 | fix_missing_notified_driver_index_and_function_search_paths | idx_trips_notified_driver_id created; search_path fixed on refresh_avg_rating, notify_nearest_driver_on_insert, process_trip_notification_timeouts, resolve_island_id |
 | fix_remaining_function_search_paths | search_path fixed on sync_driver_lat_lng, notify_nearest_driver_on_insert (final pass) |
+| candidate_review_and_driver_exclusions | trips.candidate_driver_id/candidate_approved/candidate_approved_at, trip_driver_exclusions table, app_settings.max_driver_notification_attempts=8, notify_nearest_driver_on_insert() + process_trip_notification_timeouts() rewritten for rider candidate-review flow |
 
 ---
 
