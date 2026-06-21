@@ -49,5 +49,11 @@ func RegisterRoutes(rg *gin.RouterGroup, h *Handler, cfg *config.Config) {
 
 		// Rating
 		auth.POST("/trips/:trip_id/rate", h.RateDriver)
+
+		// Candidate review
+		auth.POST("/trips/:trip_id/approve-candidate", h.ApproveCandidate)
+		auth.POST("/trips/:trip_id/reject-candidate", h.RejectCandidate)
+		auth.GET("/trips/:trip_id/rejected-drivers", h.GetRejectedDrivers)
+		auth.POST("/trips/:trip_id/reselect-driver", h.ReselectDriver)
 	}
 }

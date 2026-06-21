@@ -39,10 +39,16 @@ const tripSelect = `
 	       EXISTS(
 	           SELECT 1 FROM ratings r
 	           WHERE r.trip_id = t.id AND r.rater_role = 'rider'
-	       ) AS rider_has_rated
+	       ) AS rider_has_rated,
+	       t.candidate_driver_id, t.candidate_approved, t.candidate_approved_at::text,
+	       cdp.full_name, cdp.avatar_url, cvt.name, cdp.avg_rating,
+	       t.notification_attempts
 	FROM trips t
-	LEFT JOIN payment_methods pm ON pm.id = t.payment_method_id
-	LEFT JOIN driver_profiles dp ON dp.id = t.driver_id`
+	LEFT JOIN payment_methods pm  ON pm.id = t.payment_method_id
+	LEFT JOIN driver_profiles dp  ON dp.id = t.driver_id
+	LEFT JOIN driver_profiles cdp ON cdp.id = t.candidate_driver_id
+	LEFT JOIN driver_vehicles cdv ON cdv.id = cdp.active_vehicle_id
+	LEFT JOIN vehicle_types   cvt ON cvt.id = cdv.vehicle_type_id`
 
 // scanTrip scans a row into TripResponse. Column order must match tripSelect.
 func scanTrip(row interface {
@@ -63,6 +69,9 @@ func scanTrip(row interface {
 		&t.PickupLat, &t.PickupLng,
 		&t.DropoffLat, &t.DropoffLng,
 		&t.RiderHasRated,
+		&t.CandidateDriverID, &t.CandidateApproved, &t.CandidateApprovedAt,
+		&t.CandidateDriverName, &t.CandidateDriverAvatarURL, &t.CandidateVehicleType, &t.CandidateDriverRating,
+		&t.NotificationAttempts,
 	)
 }
 

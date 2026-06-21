@@ -100,6 +100,17 @@ type TripResponse struct {
 
 	// Rating state
 	RiderHasRated bool `json:"rider_has_rated"`
+
+	// Candidate-review state — populated by notify_nearest_driver_on_insert(),
+	// process_trip_notification_timeouts(), and the candidate-review endpoints.
+	CandidateDriverID        *string  `json:"candidate_driver_id"`
+	CandidateApproved        bool     `json:"candidate_approved"`
+	CandidateApprovedAt      *string  `json:"candidate_approved_at"`
+	CandidateDriverName      *string  `json:"candidate_driver_name"`
+	CandidateDriverAvatarURL *string  `json:"candidate_driver_avatar_url"`
+	CandidateVehicleType     *string  `json:"candidate_vehicle_type"`
+	CandidateDriverRating    *float64 `json:"candidate_driver_rating"`
+	NotificationAttempts     int      `json:"notification_attempts"`
 }
 
 type CounterOfferRequest struct {
@@ -131,4 +142,24 @@ type NearbyDriver struct {
 
 type MessageResponse struct {
 	Message string `json:"message"`
+}
+
+// ── Candidate review ──────────────────────────────────────────────────────────
+
+type ApproveCandidateRequest struct {
+	DriverID string `json:"driver_id" binding:"required"`
+}
+
+type ReselectDriverRequest struct {
+	DriverID string `json:"driver_id" binding:"required"`
+}
+
+type RejectedDriverResponse struct {
+	DriverID    string   `json:"driver_id"`
+	FullName    string   `json:"full_name"`
+	AvatarURL   *string  `json:"avatar_url"`
+	VehicleType string   `json:"vehicle_type"`
+	AvgRating   *float64 `json:"avg_rating"`
+	RatingCount int      `json:"rating_count"`
+	IsAvailable bool     `json:"is_available"`
 }

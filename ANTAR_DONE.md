@@ -1,11 +1,97 @@
 # Antar — Completed Work Log
-**Last updated:** June 2026 (candidate-review architecture session)
+**Last updated:** June 2026 (candidate-review server side complete)
 **Do NOT paste this in new AI sessions unless debugging a regression.**
 **Reference only — tracks what has been built and fixed.**
 
 ---
 
-## This Session — Candidate-Review Architecture (DB) + FCM Re-Investigation
+## This Session — Candidate-Review Server Endpoints (complete)
+
+### Withdraw Offer endpoint + driver TripCard avatar field
+
+New `WithdrawOffer` handler in `driver/handler_trips.go`
+(`POST /driver/trips/:id/withdraw-offer`, registered in `driver/routes.go`)
+— the driver-side equivalent of rider's `RejectOffer`. Root cause this
+fixes: `CancelTrip` filters on `driver_id`, which is still NULL pre-
+acceptance, so it silently no-ops for `offered`-status trips — meaning
+"Tolak & Batalkan" on `CounterDecisionScreen` was likely already broken in
+production, not just the new Withdraw button.
+
+- Matches on `offered_by = $driverID` (the correct ownership column at
+  `status='offered'`)
+- Resets `status='requested'`, clears `offered_by`/`offered_fare`/
+  `last_offer_by`, zeros both counter columns
+- Inserts the withdrawing driver into `trip_driver_exclusions`, then
+  searches for the next nearest eligible candidate using the same matching
+  SQL as rider's `RejectCandidate` (kept in sync with
+  `notify_nearest_driver_on_insert()`), and assigns/auto-fires FCM to them
+- Does not increment `notification_attempts` (reserved for cron timeouts)
+- **Flagged, not yet confirmed by Richard:** auto-reassigning the next
+  candidate goes slightly beyond the original TODO note (which only said
+  "reset to requested"). Without it, `candidate_driver_id` would otherwise
+  still point at the withdrawing driver. Worth a retest before the client
+  wiring (`CounterDecisionViewModel.rejectAndReset()`, new Withdraw button
+  on `WaitingForRiderScreen`) depends on this behavior.
+
+`driver/handler_trips.go` `IncomingTrips` + `driver/model.go`
+`IncomingTripResponse`: added `rp.avatar_url` to the SELECT and
+`RiderAvatarURL *string` to the struct, closing out the server half of the
+TripCard avatar item. Kotlin model + `AsyncImage` rendering still pending.
+
+This closes out all server-side work for the candidate-review architecture.
+Everything remaining on `ANTAR_TODO.md` for this feature is client-only.
+
+---
+
+## Previous — Candidate-Review Server Endpoints (4 endpoints + 2 follow-ons)
+
+### Rider candidate-review — 4 endpoints + 2 follow-ons shipped
+
+New file `rider/handler_candidate.go`: `approve-candidate`,
+`reject-candidate`, `rejected-drivers`, `reselect-driver` — registered in
+`rider/routes.go`; request/response structs added to `rider/model.go`.
+
+- `approve-candidate` — re-validates driver availability (online + active
+  vehicle type match + not on another active trip) via new shared
+  `checkDriverAvailability()` helper; race-guards against cron reassignment
+  by requiring the client to echo back the candidate `driver_id` it last saw.
+- `reject-candidate` — inserts into `trip_driver_exclusions`, then finds the
+  next nearest eligible driver via SQL duplicated inline from
+  `notify_nearest_driver_on_insert()` (verified live via `pg_get_functiondef`
+  before writing — not reconstructed from the changelog). Does not touch
+  `notification_attempts` (reserved for cron-driven non-response only).
+- `rejected-drivers` — lists the trip's exclusion list with a computed
+  `is_available` flag per driver.
+- `reselect-driver` — only callable when `candidate_driver_id IS NULL`;
+  removes the exclusion row, re-validates, auto-approves immediately (no
+  second review step, per locked decision #8).
+- `approve-candidate` and `reselect-driver` both fire the same `"new_trip"`
+  FCM payload the queue processor uses, via shared
+  `notifyCandidateDriver()`.
+
+**Follow-on A** — `rider/handler_trips.go` `tripSelect`/`scanTrip` extended
+with a second `driver_profiles` join (aliased `cdp`) for candidate fields:
+driver name, avatar, vehicle type, rating, plus
+`candidate_approved`/`candidate_approved_at`/`notification_attempts`.
+Flows through `GetActiveTrip`, `ListTrips`, `GetTrip` automatically — no new
+read endpoint needed for the future `CandidateReview` screen.
+
+**Follow-on B** — `driver/handler_trips.go` `IncomingTrips` now filters by
+`candidate_driver_id = <driver> AND candidate_approved = true`, in addition
+to the existing island/vehicle-type filters. Drivers no longer browse all
+open requests in their island — only trips where they're the approved
+candidate. `candidate_approved_at` added to the response
+(`driver/model.go`) for the still-pending countdown UI.
+
+Verified via Supabase MCP before writing any code: live function bodies for
+both `notify_nearest_driver_on_insert()` and
+`process_trip_notification_timeouts()`, plus column shapes for `trips`,
+`trip_driver_exclusions`, `driver_profiles`. No DB migration needed this
+session — server code only.
+
+---
+
+## Earlier Session — Candidate-Review Architecture (DB) + FCM Re-Investigation
 
 ### Rider candidate-review / driver-approval architecture — DB migration applied
 Full design locked with Richard (see `ANTAR_TODO.md` for the complete decision
@@ -62,7 +148,7 @@ applied before moving fully into this log.
 
 ---
 
-## Previous Session — Rider App Pass + Driver Bug Fixes
+## Earlier Still — Rider App Pass + Driver Bug Fixes
 
 ### Rider App — route/marker pass (mirrors driver pattern)
 - **TOKEN-RACE fixed** — `Apiclient.kt` `TokenAuthenticator` replaced
@@ -158,10 +244,11 @@ applied before moving fully into this log.
 - FCM token save
 - Vehicle types (enabled only)
 - Earnings: today/week/month/all-time + 7-day daily breakdown (generate_series for zero-fill)
-- Incoming trips: filtered by vehicle_type_id + island_id + status=requested
+- Incoming trips: filtered by vehicle_type_id + island_id + status=requested + candidate_driver_id/candidate_approved (this session)
 - Offer price: atomic lock (UPDATE WHERE status=requested), floor price enforced, FCM to rider
 - Counter offer: floor enforced, driver counter limit enforced, FCM to rider
 - Start/Complete/Cancel trip
+- Withdraw offer (this session) — driver-side reset of an `offered` trip back to `requested`, fixes the latent `driver_id`-null bug in the old reuse-CancelTrip approach
 - Rate rider (1-5 stars, one-time per trip, unique constraint)
 - Active trip recovery endpoint
 
@@ -173,8 +260,9 @@ applied before moving fully into this log.
 - Reject offer → back to requested, resets all negotiation counters
 - Counter offer: floor enforced, rider counter limit enforced, FCM to driver
 - Cancel trip (requested status only)
-- Active trip + trip list + single trip (all with driver lat/lng + pickup/dropoff coords via ST_Y/ST_X join)
+- Active trip + trip list + single trip (all with driver lat/lng + pickup/dropoff coords via ST_Y/ST_X join, plus candidate fields this session)
 - Rate driver (1-5 stars)
+- **Candidate review (this session)**: approve-candidate, reject-candidate, rejected-drivers, reselect-driver — see "This Session" above
 
 ### Admin Endpoints
 - Vehicle types CRUD
@@ -344,3 +432,4 @@ applied before moving fully into this log.
 - **Offered trip expiry:** stale `offered` trips auto-reset after 10 min via pg_cron
 - **All 5 app-owned functions** have `SET search_path = public, pg_catalog`
 - **idx_trips_notified_driver_id** index exists
+- **Candidate-review flow** live server-side: `notify_nearest_driver_on_insert()`/`process_trip_notification_timeouts()` assign/rotate candidates; rider-facing approve/reject/reselect endpoints shipped this session

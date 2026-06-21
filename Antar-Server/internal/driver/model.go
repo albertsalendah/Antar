@@ -91,18 +91,20 @@ type UpdateLocationRequest struct {
 // IncomingTripResponse is what the driver sees when browsing open requests.
 // Only trips matching the driver's active vehicle type are returned.
 type IncomingTripResponse struct {
-	ID              string   `json:"id"`
-	RiderID         string   `json:"rider_id"`
-	RiderName       string   `json:"rider_name"`
-	TripType        string   `json:"trip_type"`
-	Note            *string  `json:"note"`
-	PickupAddress   string   `json:"pickup_address"`
-	DropoffAddress  *string  `json:"dropoff_address"`
-	DistanceM       *float64 `json:"distance_m"`
-	DefaultFare     float64  `json:"default_fare"`
-	VehicleTypeName string   `json:"vehicle_type"`
-	PaymentMethod   string   `json:"payment_method"`
-	CreatedAt       string   `json:"created_at"`
+	ID                  string   `json:"id"`
+	RiderID             string   `json:"rider_id"`
+	RiderName           string   `json:"rider_name"`
+	RiderAvatarURL      *string  `json:"rider_avatar_url"`
+	TripType            string   `json:"trip_type"`
+	Note                *string  `json:"note"`
+	PickupAddress       string   `json:"pickup_address"`
+	DropoffAddress      *string  `json:"dropoff_address"`
+	DistanceM           *float64 `json:"distance_m"`
+	DefaultFare         float64  `json:"default_fare"`
+	VehicleTypeName     string   `json:"vehicle_type"`
+	PaymentMethod       string   `json:"payment_method"`
+	CreatedAt           string   `json:"created_at"`
+	CandidateApprovedAt *string  `json:"candidate_approved_at"`
 }
 
 // OfferPriceRequest — driver sets the initial price.
