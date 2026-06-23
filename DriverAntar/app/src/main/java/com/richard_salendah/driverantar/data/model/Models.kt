@@ -76,7 +76,9 @@ data class IncomingTripResponse(
     val default_fare: Double,        // floor — driver must offer ≥ this
     val vehicle_type: String,
     val payment_method: String,
-    val created_at: String
+    val created_at: String,
+    val candidate_approved_at: String?,   // drives the TripCard countdown
+    val rider_avatar_url: String?
 )
 
 // ── Trips — offer / counter ───────────────────────────────────────────────────

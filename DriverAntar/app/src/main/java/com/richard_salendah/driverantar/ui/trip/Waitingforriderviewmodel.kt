@@ -36,6 +36,8 @@ sealed class WaitingUiState {
         val driverCounterCount: Int = 0
     ) : WaitingUiState()
     object Cancelled : WaitingUiState()
+    /** Driver pulled back their own offer before the rider responded. */
+    object Withdrawn : WaitingUiState()
     data class Error(val message: String) : WaitingUiState()
 }
 
@@ -48,6 +50,8 @@ class WaitingForRiderViewModel(
 ) : ViewModel() {
 
     var uiState by mutableStateOf<WaitingUiState>(WaitingUiState.Waiting); private set
+    /** Guards against double-tap on the Withdraw button while the request is in flight */
+    var isWithdrawing by mutableStateOf(false); private set
 
     private var realtimeChannel: RealtimeChannel? = null
     private var pollJob: Job? = null
@@ -158,6 +162,41 @@ class WaitingForRiderViewModel(
             status == "offered" && lastOfferBy == "rider" ->
                 WaitingUiState.RiderCountered(newFare ?: 0.0, driverCounterCount)
             else -> return // still offered/driver-turn — no change
+        }
+    }
+
+    // ── Driver-initiated withdraw ─────────────────────────────────────────────
+
+    /**
+     * Driver pulls back their own offer before the rider has responded.
+     *
+     * WithdrawOffer's own server-side UPDATE flips status back to 'requested' —
+     * the same signal applyStatus() treats as Rejected (rider declined). Stop
+     * polling/Realtime BEFORE setting Withdrawn so that signal can't race in
+     * afterwards and show the wrong terminal state/message.
+     */
+    fun withdrawOffer() {
+        if (uiState !is WaitingUiState.Waiting || isWithdrawing) return
+        isWithdrawing = true
+        viewModelScope.launch {
+            repository.withdrawOffer(SessionManager.token, tripId)
+                .onSuccess {
+                    pollJob?.cancel()
+                    pollJob = null
+                    try {
+                        realtimeChannel?.let { ch ->
+                            ch.unsubscribe()
+                            SupabaseClientHolder.client.realtime.removeChannel(ch)
+                        }
+                    } catch (e: Exception) {
+                        Log.w(TAG, "Error cleaning up Realtime channel after withdraw", e)
+                    }
+                    uiState = WaitingUiState.Withdrawn
+                }
+                .onFailure { e ->
+                    isWithdrawing = false
+                    uiState = WaitingUiState.Error(e.message ?: "Failed to withdraw offer")
+                }
         }
     }
 

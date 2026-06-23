@@ -104,7 +104,7 @@ class CounterDecisionViewModel(
     fun rejectAndReset() {
         viewModelScope.launch {
             state = CounterDecisionState.Loading
-            repository.cancelTrip(SessionManager.token, tripId)
+            repository.withdrawOffer(SessionManager.token, tripId)
                 .onSuccess { state = CounterDecisionState.Rejected }
                 .onFailure { e -> state = CounterDecisionState.Error(e.message ?: "Failed to reject") }
         }

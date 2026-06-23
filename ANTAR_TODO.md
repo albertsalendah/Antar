@@ -1,5 +1,5 @@
 # Antar — Master TODO
-**Last updated:** June 2026 (candidate-review server side complete — client work next)
+**Last updated:** June 2026 (driver TripCard countdown + Withdraw Offer wiring delivered this session, pending Richard's confirmation)
 **Paste this file at the start of every session.**
 
 ---
@@ -16,11 +16,9 @@ avatar field, are done (see `ANTAR_DONE.md` for full detail):
 - `driver/handler_trips.go` / `driver/model.go` — `IncomingTrips` filtered
   by `candidate_driver_id`/`candidate_approved`, plus `candidate_approved_at`
   and `rider_avatar_url` on the response
-- `driver/handler_trips.go` / `driver/routes.go` — new `WithdrawOffer`
-  endpoint (`POST /driver/trips/:id/withdraw-offer`), auto-reassigns next
-  candidate via the same matching SQL as `reject-candidate` — **flagged for
-  Richard's confirmation**, this auto-reassign extends slightly beyond the
-  original TODO note, retest before relying on it client-side
+- `driver/handler_trips.go` / `driver/routes.go` — `WithdrawOffer` endpoint
+  (`POST /driver/trips/:id/withdraw-offer`), auto-reassigns next candidate
+  via the same matching SQL as `reject-candidate`
 
 **Server side for this feature is done. Everything left below is client-only.**
 
@@ -49,11 +47,49 @@ already exists on the model but is currently unused in the card UI.
 
 ---
 
+## 🟢 Driver — TripCard candidate countdown (code delivered, confirm + move to DONE)
+
+- `Incomingtripsscreen.kt` `TripCard` — countdown ticks down from
+  `candidate_approved_at`, 3-minute window. Duration verified live against
+  `process_trip_notification_timeouts()` via Supabase MCP, not assumed from
+  session notes — function hardcodes `INTERVAL '3 minutes'`, no
+  `app_settings` key exists for it (not admin-configurable today).
+- Card fades + countdown turns red in the last 30s; tap and "Tawar" button
+  disable at zero. Purely local/cosmetic — no API call, no forced removal;
+  the cron job (`trip-notification-fallback`, runs every 60s) is what
+  actually reassigns the candidate, so the card can sit faded for up to
+  ~1 min past zero before the next 5s poll drops it.
+- `Models.kt` — `IncomingTripResponse` gained `candidate_approved_at: String?`.
+- **Richard: confirm the countdown/fade feel is right on-device, then move
+  to `ANTAR_DONE.md`.**
+
+---
+
+## 🟢 Driver — Withdraw Offer wiring (code delivered, confirm + move to DONE)
+
+- `DriverApiService.kt` / `DriverRepository.kt` — new `withdrawOffer()`
+  calling `POST /driver/trips/:id/withdraw-offer`.
+- `CounterDecisionViewModel.rejectAndReset()` — switched from `cancelTrip`
+  (confirmed broken pre-acceptance — filters on `driver_id`, which is NULL
+  at `status='offered'`) to `withdrawOffer`.
+- `Waitingforriderviewmodel.kt` — new `Withdrawn` state + `withdrawOffer()`.
+  Stops polling/Realtime *before* setting state, to avoid racing against the
+  server's own `status='requested'` update, which `applyStatus()` would
+  otherwise read as a rider rejection and show the wrong message.
+- `Waitingforriderscreen.kt` — new "Tarik Penawaran" button + confirm
+  dialog, same pattern as `ActiveTripScreen`'s cancel-trip confirmation.
+- `Appnavgraph.kt` — wired new `onTripWithdrawn` callback for
+  `WaitingForRiderScreen`, same nav pattern as `onTripRejected`/`onTripCancelled`.
+- **This is the first real test of `withdraw-offer`'s auto-reassign-next-
+  candidate side effect (previously flagged as untested in
+  `ANTAR_DONE.md`). Richard: test both trigger points — Withdraw button on
+  WaitingForRider, and "Tolak & Batalkan" on CounterDecision — and confirm
+  the next candidate is correctly reassigned/notified before moving to DONE.**
+
+---
+
 ## 🔵 Client-only — server already supports these
 
-- **Driver `TripCard` countdown** — `candidate_approved_at` already
-  returned; client-side `LaunchedEffect` ticking every second, card
-  fades/removes at zero
 - **Rider new screens/routes** (`Screen.kt`): `CandidateReview/{tripId}`,
   `NoDriverFound/{tripId}`, `RejectedDriverList/{tripId}`. Navigation:
   `requestRide` success → directly to `CandidateReview` (decision #7).
@@ -72,9 +108,6 @@ already exists on the model but is currently unused in the card UI.
   (decision #8); calls existing `GET rejected-drivers` to populate, available
   entries selectable, unavailable greyed out; selection calls
   `reselect-driver`
-- **Driver Withdraw Offer wiring** — server endpoint
-  (`POST /driver/trips/:id/withdraw-offer`) is live. `CounterDecisionViewModel.rejectAndReset()`
-  and a new Withdraw button on `WaitingForRiderScreen` both need to call it
 
 ---
 
@@ -96,6 +129,10 @@ relative to process/Activity recreation on cold start, and whether
 Client-side only. `Incomingtripsviewmodel.kt` `declinedTripIds` set +
 `declineTrip(tripId)`; `Incomingtripsscreen.kt` dismiss `IconButton`.
 **Richard: confirm this is applied and working, then move to `ANTAR_DONE.md`.**
+
+Note: this predates the countdown work delivered this session — re-check
+`Incomingtripsscreen.kt`'s `TripCard` still has the dismiss `IconButton`
+wired correctly alongside the new countdown/fade UI before confirming.
 
 ---
 

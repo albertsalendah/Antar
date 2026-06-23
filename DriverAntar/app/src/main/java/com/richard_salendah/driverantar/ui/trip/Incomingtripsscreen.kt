@@ -1,29 +1,42 @@
 package com.richard_salendah.driverantar.ui.trip
 
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.LocationOn
+import androidx.compose.material.icons.filled.Person
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.navigation.NavController
+import coil.compose.AsyncImage
+import coil.request.CachePolicy
+import coil.request.ImageRequest
 import com.richard_salendah.driverantar.data.model.IncomingTripResponse
 import com.richard_salendah.driverantar.ui.components.OfflineBanner
 import com.richard_salendah.driverantar.ui.components.SkeletonTripCard
 import com.richard_salendah.driverantar.utils.ConnectivityObserver
+import kotlinx.coroutines.delay
 import java.text.NumberFormat
+import java.text.SimpleDateFormat
 import java.util.Locale
+import java.util.TimeZone
 import kotlin.math.roundToInt
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -145,9 +158,9 @@ fun IncomingTripsScreen(
                         }
                         items(trips, key = { it.id }) { trip ->
                             TripCard(
-                                trip      = trip,
+                                trip           = trip,
                                 actionsEnabled = isOnline,
-                                onClick   = { if (isOnline) onTripSelected(trip) }
+                                onClick        = { if (isOnline) onTripSelected(trip) }
                             )
                         }
                         item { Spacer(Modifier.height(72.dp)) }
@@ -158,6 +171,50 @@ fun IncomingTripsScreen(
     }
 }
 
+// ── Candidate countdown ───────────────────────────────────────────────────────
+// Mirrors the live process_trip_notification_timeouts() 3-minute candidate
+// window (verified via Supabase MCP, not hardcoded from memory). Purely a
+// local visual cue — no action is triggered at zero. The trip naturally
+// disappears once the cron job (runs every 60s) actually reassigns it and
+// the next 5s poll refreshes the list.
+
+private const val CANDIDATE_WINDOW_SECONDS = 180
+private const val FADE_WARNING_SECONDS     = 30   // last 30s — fade + countdown turns red
+
+/** Parses a Postgres timestamptz::text value (space- or 'T'-separated, with/without offset) as UTC epoch millis. */
+private fun parseUtcEpochMillis(raw: String): Long? = try {
+    val cleaned = raw.replace(' ', 'T').substringBefore("+").substringBefore("Z").take(19)
+    SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss", Locale.US).apply {
+        timeZone = TimeZone.getTimeZone("UTC")
+    }.parse(cleaned)?.time
+} catch (e: Exception) { null }
+
+/** Ticks every second. Returns null if [approvedAt] is null/unparseable (countdown simply isn't shown). */
+@Composable
+private fun rememberCandidateRemainingSeconds(approvedAt: String?): Int? {
+    if (approvedAt == null) return null
+    val approvedAtMillis = remember(approvedAt) { parseUtcEpochMillis(approvedAt) } ?: return null
+
+    var remaining by remember(approvedAt) {
+        mutableStateOf(
+            (CANDIDATE_WINDOW_SECONDS - (System.currentTimeMillis() - approvedAtMillis) / 1000).toInt()
+        )
+    }
+    LaunchedEffect(approvedAt) {
+        // Stop ticking shortly after expiry — the card will be gone on the next poll anyway
+        while (remaining > -2) {
+            delay(1_000L)
+            remaining = (CANDIDATE_WINDOW_SECONDS - (System.currentTimeMillis() - approvedAtMillis) / 1000).toInt()
+        }
+    }
+    return remaining
+}
+
+private fun formatCountdown(seconds: Int): String {
+    val clamped = seconds.coerceAtLeast(0)
+    return "%d:%02d".format(clamped / 60, clamped % 60)
+}
+
 // ── Trip card ─────────────────────────────────────────────────────────────────
 
 @Composable
@@ -166,15 +223,27 @@ private fun TripCard(
     actionsEnabled: Boolean,
     onClick: () -> Unit
 ) {
-    val isErrand = trip.trip_type == "errand"
+    val isErrand         = trip.trip_type == "errand"
+    val remainingSeconds = rememberCandidateRemainingSeconds(trip.candidate_approved_at)
+    val expired          = remainingSeconds != null && remainingSeconds <= 0
+
+    val cardAlpha by animateFloatAsState(
+        targetValue = when {
+            remainingSeconds == null || remainingSeconds > FADE_WARNING_SECONDS -> 1f
+            else -> 0.4f + 0.6f * (remainingSeconds.coerceAtLeast(0) / FADE_WARNING_SECONDS.toFloat())
+        },
+        label = "tripCardFade"
+    )
 
     Card(
         onClick   = onClick,
-        enabled   = actionsEnabled,
-        modifier  = Modifier.fillMaxWidth(),
+        enabled   = actionsEnabled && !expired,
+        modifier  = Modifier.fillMaxWidth().alpha(cardAlpha),
         elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
     ) {
         Column(modifier = Modifier.padding(16.dp)) {
+
+            // ── Badge row + countdown ─────────────────────────────────────────
             Row(
                 modifier              = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
@@ -195,18 +264,39 @@ private fun TripCard(
                             .padding(horizontal = 8.dp, vertical = 3.dp)
                     )
                 }
-                trip.distance_m?.let { distM ->
-                    Text(
-                        formatDistance(distM),
-                        style      = MaterialTheme.typography.labelMedium,
-                        color      = MaterialTheme.colorScheme.primary,
-                        fontWeight = FontWeight.SemiBold
-                    )
+                Column(horizontalAlignment = Alignment.End) {
+                    trip.distance_m?.let { distM ->
+                        Text(
+                            formatDistance(distM),
+                            style      = MaterialTheme.typography.labelMedium,
+                            color      = MaterialTheme.colorScheme.primary,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                    }
+                    remainingSeconds?.let { rem ->
+                        Text(
+                            text  = if (rem > 0) formatCountdown(rem) else "Kedaluwarsa",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = if (rem <= FADE_WARNING_SECONDS)
+                                MaterialTheme.colorScheme.error
+                            else
+                                MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
                 }
             }
 
             Spacer(Modifier.height(10.dp))
 
+            // ── Rider avatar + name ───────────────────────────────────────────
+            RiderAvatarRow(
+                avatarUrl = trip.rider_avatar_url,
+                name      = trip.rider_name
+            )
+
+            Spacer(Modifier.height(10.dp))
+
+            // ── Errand instruction card ───────────────────────────────────────
             if (isErrand && !trip.note.isNullOrBlank()) {
                 Card(
                     colors   = CardDefaults.cardColors(
@@ -227,13 +317,12 @@ private fun TripCard(
                 Spacer(Modifier.height(10.dp))
             }
 
-            AddressRow("Jemput", trip.pickup_address,
-                MaterialTheme.colorScheme.primary)
+            // ── Addresses ─────────────────────────────────────────────────────
+            AddressRow("Jemput", trip.pickup_address, MaterialTheme.colorScheme.primary)
 
             if (!trip.dropoff_address.isNullOrBlank()) {
                 Spacer(Modifier.height(4.dp))
-                AddressRow("Tujuan", trip.dropoff_address,
-                    MaterialTheme.colorScheme.error)
+                AddressRow("Tujuan", trip.dropoff_address, MaterialTheme.colorScheme.error)
             } else if (isErrand) {
                 Spacer(Modifier.height(4.dp))
                 Text("Tujuan: belum ditentukan",
@@ -246,6 +335,7 @@ private fun TripCard(
             HorizontalDivider()
             Spacer(Modifier.height(10.dp))
 
+            // ── Footer: fare + payment + action button ────────────────────────
             Row(
                 modifier              = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
@@ -275,14 +365,72 @@ private fun TripCard(
                     )
                     Button(
                         onClick        = onClick,
-                        enabled        = actionsEnabled,
+                        enabled        = actionsEnabled && !expired,
                         contentPadding = PaddingValues(horizontal = 16.dp, vertical = 6.dp)
                     ) {
-                        Text("Tawar", style = MaterialTheme.typography.labelMedium)
+                        Text(
+                            if (expired) "Kedaluwarsa" else "Tawar",
+                            style = MaterialTheme.typography.labelMedium
+                        )
                     }
                 }
             }
         }
+    }
+}
+
+// ── Rider avatar row ──────────────────────────────────────────────────────────
+
+/**
+ * Small circular avatar + rider name shown on the TripCard.
+ * Falls back to a generic person icon when [avatarUrl] is null (new rider
+ * who hasn't uploaded a photo yet). Coil cache disabled — same policy as
+ * ProfileScreen — so a recently changed avatar isn't stale.
+ */
+@Composable
+private fun RiderAvatarRow(avatarUrl: String?, name: String) {
+    val context = LocalContext.current
+    Row(
+        verticalAlignment     = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        if (avatarUrl != null) {
+            AsyncImage(
+                model = ImageRequest.Builder(context)
+                    .data(avatarUrl)
+                    .crossfade(true)
+                    .diskCachePolicy(CachePolicy.DISABLED)
+                    .memoryCachePolicy(CachePolicy.DISABLED)
+                    .build(),
+                contentDescription = "Foto penumpang",
+                contentScale       = ContentScale.Crop,
+                modifier           = Modifier
+                    .size(36.dp)
+                    .clip(CircleShape)
+                    .border(1.dp, MaterialTheme.colorScheme.outline, CircleShape)
+            )
+        } else {
+            Box(
+                modifier         = Modifier
+                    .size(36.dp)
+                    .clip(CircleShape)
+                    .background(MaterialTheme.colorScheme.surfaceVariant)
+                    .border(1.dp, MaterialTheme.colorScheme.outline, CircleShape),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    Icons.Filled.Person,
+                    contentDescription = null,
+                    tint     = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.size(20.dp)
+                )
+            }
+        }
+        Text(
+            text  = name.ifBlank { "Penumpang" },
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurface
+        )
     }
 }
 

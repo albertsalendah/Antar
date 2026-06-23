@@ -119,6 +119,21 @@ data class TripResponse(
     @SerializedName("dropoff_lng")          val dropoffLng: Double = 0.0,
     // Rating state
     @SerializedName("rider_has_rated")      val riderHasRated: Boolean = false,
+    // Candidate-review state — populated by notify_nearest_driver_on_insert(),
+    // process_trip_notification_timeouts(), and the candidate-review endpoints.
+    // candidateDriverId: null = no candidate yet (or exhausted), or the UUID of the suggested driver.
+    // candidateApproved: true once the rider approves via approve-candidate.
+    // candidateApprovedAt: ISO UTC timestamp of approval; drives the 3-min countdown.
+    @SerializedName("candidate_driver_id")        val candidateDriverId: String? = null,
+    @SerializedName("candidate_approved")         val candidateApproved: Boolean = false,
+    @SerializedName("candidate_approved_at")      val candidateApprovedAt: String? = null,
+    @SerializedName("candidate_driver_name")      val candidateDriverName: String? = null,
+    @SerializedName("candidate_driver_avatar_url") val candidateDriverAvatarUrl: String? = null,
+    @SerializedName("candidate_vehicle_type")     val candidateVehicleType: String? = null,
+    @SerializedName("candidate_driver_rating")    val candidateDriverRating: Double? = null,
+    // notification_attempts > 0 means the cron has tried and failed at least once.
+    // candidateDriverId == null && notificationAttempts > 0 = exhausted, no drivers left.
+    @SerializedName("notification_attempts")      val notificationAttempts: Int = 0,
 )
 data class CounterOfferRequest(@SerializedName("offered_fare") val offeredFare: Double)
 data class CounterOfferResponse(
@@ -126,6 +141,39 @@ data class CounterOfferResponse(
     @SerializedName("offered_fare") val offeredFare: Double,
 )
 data class RateRequest(val score: Int, val comment: String? = null)
+
+// ── Candidate review ──────────────────────────────────────────────────────────
+
+// Sent when the rider approves the suggested candidate driver.
+// The server re-validates availability and fires FCM to the driver on success.
+data class ApproveCandidateRequest(
+    @SerializedName("driver_id") val driverId: String,
+)
+
+// Returned by POST reject-candidate.
+// candidateDriverId is the newly assigned candidate's UUID, or null if no eligible drivers remain.
+data class RejectCandidateResponse(
+    @SerializedName("candidate_driver_id") val candidateDriverId: String? = null,
+    val message: String = "",
+)
+
+// One entry in the trip's rejected-drivers exclusion list.
+// isAvailable re-checks online + vehicle type + not on another trip at query time.
+data class RejectedDriverResponse(
+    @SerializedName("driver_id")    val driverId: String,
+    @SerializedName("full_name")    val fullName: String,
+    @SerializedName("avatar_url")   val avatarUrl: String? = null,
+    @SerializedName("vehicle_type") val vehicleType: String,
+    @SerializedName("avg_rating")   val avgRating: Double? = null,
+    @SerializedName("rating_count") val ratingCount: Int = 0,
+    @SerializedName("is_available") val isAvailable: Boolean = false,
+)
+
+// Sent when the rider picks a previously-rejected driver from the NoDriverFound screen.
+// The server removes the exclusion, re-validates, and auto-approves.
+data class ReselectDriverRequest(
+    @SerializedName("driver_id") val driverId: String,
+)
 
 // ── Shared ────────────────────────────────────────────────────────────────────
 data class MessageResponse(val message: String)

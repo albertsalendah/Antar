@@ -12,6 +12,16 @@ sealed class Screen(val route: String) {
     object Profile : Screen("profile")
 
     // ── Trip lifecycle ────────────────────────────────────────────────────────
+
+    // CandidateReview replaces Searching as the primary post-booking destination.
+    // Rider reviews the suggested driver, approves/rejects, then waits for the
+    // driver to make an offer. Searching is kept for legacy deep-link compatibility.
+    object CandidateReview : Screen("candidate_review/{tripId}") {
+        fun route(tripId: String) = "candidate_review/$tripId"
+    }
+    object NoDriverFound : Screen("no_driver_found/{tripId}") {
+        fun route(tripId: String) = "no_driver_found/$tripId"
+    }
     object Searching : Screen("searching/{tripId}") {
         fun route(tripId: String) = "searching/$tripId"
     }

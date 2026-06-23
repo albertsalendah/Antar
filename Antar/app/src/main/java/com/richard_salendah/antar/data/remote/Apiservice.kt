@@ -80,4 +80,35 @@ interface ApiService {
         @Path("tripId") tripId: String,
         @Body body: RateRequest,
     ): Response<ApiResponse<MessageResponse>>
+
+    // ── Candidate review ──────────────────────────────────────────────────────
+
+    // Approve the suggested candidate driver; server fires FCM to notify them.
+    @POST("api/v1/rider/trips/{tripId}/approve-candidate")
+    suspend fun approveCandidate(
+        @Path("tripId") tripId: String,
+        @Body body: ApproveCandidateRequest,
+    ): Response<ApiResponse<MessageResponse>>
+
+    // Reject the current candidate; server finds the next nearest eligible driver.
+    // Response data contains the new candidate_driver_id (null = no drivers left).
+    @POST("api/v1/rider/trips/{tripId}/reject-candidate")
+    suspend fun rejectCandidate(
+        @Path("tripId") tripId: String,
+    ): Response<ApiResponse<RejectCandidateResponse>>
+
+    // List all drivers previously rejected for this trip (exclusion list).
+    // Used by NoDriverFoundScreen to let the rider pick from earlier rejections.
+    @GET("api/v1/rider/trips/{tripId}/rejected-drivers")
+    suspend fun getRejectedDrivers(
+        @Path("tripId") tripId: String,
+    ): Response<ApiResponse<List<RejectedDriverResponse>>>
+
+    // Re-assign a previously rejected driver. Only callable when
+    // candidate_driver_id IS NULL (no current candidate). Auto-approves.
+    @POST("api/v1/rider/trips/{tripId}/reselect-driver")
+    suspend fun reselectDriver(
+        @Path("tripId") tripId: String,
+        @Body body: ReselectDriverRequest,
+    ): Response<ApiResponse<MessageResponse>>
 }

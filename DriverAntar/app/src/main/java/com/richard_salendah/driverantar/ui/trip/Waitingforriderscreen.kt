@@ -23,6 +23,7 @@ fun WaitingForRiderScreen(
     onTripAgreed: (tripId: String) -> Unit,
     onTripRejected: (message: String) -> Unit,
     onTripCancelled: (message: String) -> Unit,
+    onTripWithdrawn: (message: String) -> Unit,
     /**
      * Rider sent a counter-offer.
      * @param tripId            the trip being negotiated
@@ -38,6 +39,7 @@ fun WaitingForRiderScreen(
     ) -> Unit
 ) {
     val uiState = viewModel.uiState
+    var showWithdrawConfirm by remember { mutableStateOf(false) }
 
     LaunchedEffect(uiState) {
         when (uiState) {
@@ -46,6 +48,8 @@ fun WaitingForRiderScreen(
                 onTripRejected("Penumpang menolak penawaran — silakan cari trip lain")
             is WaitingUiState.Cancelled ->
                 onTripCancelled("Trip dibatalkan")
+            is WaitingUiState.Withdrawn ->
+                onTripWithdrawn("Penawaran ditarik — trip dikembalikan ke antrean")
             is WaitingUiState.RiderCountered -> {
                 onRiderCountered(
                     viewModel.tripId,
@@ -117,6 +121,26 @@ fun WaitingForRiderScreen(
                     )
                     Spacer(Modifier.height(24.dp))
                     LinearProgressIndicator(modifier = Modifier.fillMaxWidth(0.6f))
+
+                    Spacer(Modifier.height(32.dp))
+                    OutlinedButton(
+                        onClick  = { showWithdrawConfirm = true },
+                        enabled  = !viewModel.isWithdrawing,
+                        modifier = Modifier.fillMaxWidth().height(48.dp),
+                        colors   = ButtonDefaults.outlinedButtonColors(
+                            contentColor = MaterialTheme.colorScheme.error
+                        )
+                    ) {
+                        if (viewModel.isWithdrawing) {
+                            CircularProgressIndicator(
+                                modifier    = Modifier.size(18.dp),
+                                strokeWidth = 2.dp,
+                                color       = MaterialTheme.colorScheme.error
+                            )
+                        } else {
+                            Text("Tarik Penawaran")
+                        }
+                    }
                 }
                 is WaitingUiState.Error -> {
                     Text(
@@ -136,6 +160,31 @@ fun WaitingForRiderScreen(
                 else -> CircularProgressIndicator()
             }
         }
+    }
+
+    // ── Withdraw confirmation dialog ──────────────────────────────────────────
+    if (showWithdrawConfirm) {
+        AlertDialog(
+            onDismissRequest = { showWithdrawConfirm = false },
+            title = { Text("Tarik Penawaran?") },
+            text  = {
+                Text(
+                    "Penawaran Anda akan dibatalkan dan trip ini akan ditawarkan ke " +
+                            "driver terdekat lainnya. Lanjutkan?"
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    showWithdrawConfirm = false
+                    viewModel.withdrawOffer()
+                }) {
+                    Text("Ya, Tarik", color = MaterialTheme.colorScheme.error)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showWithdrawConfirm = false }) { Text("Tidak") }
+            }
+        )
     }
 }
 

@@ -15,7 +15,9 @@ import com.richard_salendah.antar.ui.history.TripHistoryViewModel
 import com.richard_salendah.antar.ui.home.HomeScreen
 import com.richard_salendah.antar.ui.profile.ProfileScreen
 import com.richard_salendah.antar.ui.trip.ActiveTripScreen
+import com.richard_salendah.antar.ui.trip.CandidateReviewScreen
 import com.richard_salendah.antar.ui.trip.NegotiationScreen
+import com.richard_salendah.antar.ui.trip.NoDriverFoundScreen
 import com.richard_salendah.antar.ui.trip.RateDriverScreen
 import com.richard_salendah.antar.ui.trip.SearchingScreen
 import com.richard_salendah.antar.ui.trip.TripCompleteScreen
@@ -71,8 +73,10 @@ fun AntarNavGraph(
         // ── Main ──────────────────────────────────────────────────────────────
         composable(Screen.Home.route) {
             HomeScreen(
+                // After a successful booking the rider goes directly to CandidateReview
+                // to review the suggested driver — the old "Searching" skeleton is skipped.
                 onStartSearching  = { tripId ->
-                    navController.navigate(Screen.Searching.route(tripId)) {
+                    navController.navigate(Screen.CandidateReview.route(tripId)) {
                         popUpTo(Screen.Home.route)
                     }
                 },
@@ -80,7 +84,8 @@ fun AntarNavGraph(
                 onOpenProfile     = { navController.navigate(Screen.Profile.route) },
                 onActiveTripFound = { tripId, status ->
                     val dest = when (status) {
-                        "requested"                        -> Screen.Searching.route(tripId)
+                        // Requested = still in the candidate-review / driver-search phase
+                        "requested"                        -> Screen.CandidateReview.route(tripId)
                         "offered"                          -> Screen.Negotiation.route(tripId)
                         "agreed", "arrived", "in_progress" -> Screen.ActiveTrip.route(tripId)
                         else                               -> null
@@ -130,6 +135,61 @@ fun AntarNavGraph(
         }
 
         // ── Trip lifecycle ────────────────────────────────────────────────────
+
+        // CandidateReview: primary post-booking destination. The rider reviews the
+        // suggested driver, approves/rejects, and waits for the driver to respond.
+        composable(
+            route     = Screen.CandidateReview.route,
+            arguments = listOf(navArgument("tripId") { type = NavType.StringType }),
+        ) { back ->
+            val tripId = back.arguments?.getString("tripId") ?: return@composable
+            CandidateReviewScreen(
+                tripId          = tripId,
+                onOfferReceived = {
+                    navController.navigate(Screen.Negotiation.route(tripId)) {
+                        popUpTo(Screen.CandidateReview.route) { inclusive = true }
+                    }
+                },
+                onNoDriverFound = {
+                    navController.navigate(Screen.NoDriverFound.route(tripId)) {
+                        popUpTo(Screen.CandidateReview.route) { inclusive = true }
+                    }
+                },
+                onTripCancelled = {
+                    navController.navigate(Screen.Home.route) {
+                        popUpTo(0) { inclusive = true }
+                    }
+                },
+            )
+        }
+
+        // NoDriverFound: shown when the exclusion list is exhausted or the rider
+        // manually reaches this screen from the non-response dialog. The rider
+        // can pick a previously-rejected driver (reselect-driver endpoint) or cancel.
+        composable(
+            route     = Screen.NoDriverFound.route,
+            arguments = listOf(navArgument("tripId") { type = NavType.StringType }),
+        ) { back ->
+            val tripId = back.arguments?.getString("tripId") ?: return@composable
+            NoDriverFoundScreen(
+                tripId             = tripId,
+                // reselectDriver auto-approves server-side; navigate to a fresh
+                // CandidateReview instance so the countdown starts from the new approval.
+                onDriverReselected = {
+                    navController.navigate(Screen.CandidateReview.route(tripId)) {
+                        popUpTo(Screen.NoDriverFound.route) { inclusive = true }
+                    }
+                },
+                onTripCancelled    = {
+                    navController.navigate(Screen.Home.route) {
+                        popUpTo(0) { inclusive = true }
+                    }
+                },
+            )
+        }
+
+        // Searching: kept for legacy deep-link compatibility but no longer reached
+        // via the normal booking flow — CandidateReview replaced it.
         composable(
             route     = Screen.Searching.route,
             arguments = listOf(navArgument("tripId") { type = NavType.StringType }),
@@ -162,8 +222,11 @@ fun AntarNavGraph(
                         popUpTo(Screen.Negotiation.route) { inclusive = true }
                     }
                 },
-                onTripReset = {
-                    navController.navigate(Screen.Searching.route(tripId)) {
+                // When the rider rejects a negotiation, the trip resets to 'requested'.
+                // CandidateReview resumes — the same candidate is still approved;
+                // they can offer again or the rider can seek a different driver.
+                onTripReset     = {
+                    navController.navigate(Screen.CandidateReview.route(tripId)) {
                         popUpTo(Screen.Negotiation.route) { inclusive = true }
                     }
                 },
@@ -216,7 +279,6 @@ fun AntarNavGraph(
                     if (fromHistory) {
                         // RATE-DUP: signal History via a single "last_rated_trip" key
                         // so TripHistoryViewModel.onRatingDone() is called on pop.
-                        // Replaced the previous per-trip "rated_$tripId" key + observeForever.
                         navController.previousBackStackEntry
                             ?.savedStateHandle
                             ?.set("last_rated_trip", tripId)

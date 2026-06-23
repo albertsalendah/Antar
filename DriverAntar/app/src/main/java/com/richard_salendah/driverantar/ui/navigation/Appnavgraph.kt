@@ -256,6 +256,13 @@ fun AppNavGraph(
                     navController.currentBackStackEntry
                         ?.savedStateHandle?.set("snack", message)
                 },
+                onTripWithdrawn = { message ->
+                    navController.navigate(Screen.IncomingTrips.route) {
+                        popUpTo(Screen.IncomingTrips.route) { inclusive = false }
+                    }
+                    navController.currentBackStackEntry
+                        ?.savedStateHandle?.set("snack", message)
+                },
                 // Use the real admin floor (defaultFare) and the accurate counter
                 // count from the Realtime payload — not the driver's offered price.
                 onRiderCountered = { id, riderFare, driverCounterCount, realDefaultFare ->

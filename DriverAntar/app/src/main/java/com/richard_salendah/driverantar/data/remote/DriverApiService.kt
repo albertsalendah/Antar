@@ -127,6 +127,13 @@ interface DriverApiService {
         @Body request: CounterOfferRequest
     ): Response<ApiResponse<Unit>>
 
+    /** Driver withdraws their pending offer — trip resets to requested and may auto-reassign to the next nearest candidate. */
+    @POST("api/v1/driver/trips/{trip_id}/withdraw-offer")
+    suspend fun withdrawOffer(
+        @Header("Authorization") token: String,
+        @Path("trip_id") tripId: String
+    ): Response<ApiResponse<Unit>>
+
     /** Moves trip from agreed → in_progress. Driver taps when arriving at pickup. */
     @POST("api/v1/driver/trips/{trip_id}/start")
     suspend fun startTrip(

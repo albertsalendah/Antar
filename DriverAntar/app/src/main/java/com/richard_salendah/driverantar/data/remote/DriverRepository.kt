@@ -111,6 +111,9 @@ class DriverRepository(private val api: DriverApiService) {
         api.counterOffer(token, tripId, CounterOfferRequest(fare)).unwrapVoid()
     }
 
+    suspend fun withdrawOffer(token: String, tripId: String): Result<Unit> = safeCall {
+        api.withdrawOffer(token, tripId).unwrapVoid()
+    }
     suspend fun startTrip(token: String, tripId: String): Result<Unit> = safeCall {
         api.startTrip(token, tripId).unwrapVoid()
     }
