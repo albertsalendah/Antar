@@ -18,21 +18,20 @@ class IncomingTripsViewModel(private val repository: DriverRepository) : ViewMod
     var trips        by mutableStateOf<List<IncomingTripResponse>>(emptyList()); private set
     var isLoading    by mutableStateOf(false);                                   private set
     var errorMessage by mutableStateOf<String?>(null);                           private set
-    /** Non-null when the driver just submitted an offer and we're waiting for a response */
     var snackMessage by mutableStateOf<String?>(null);                           private set
+    /**
+     * Non-null while a decline request is in flight for a specific trip.
+     * Used by TripCard to show a loading indicator and disable both buttons.
+     * Only one trip can be declining at a time.
+     */
+    var decliningTripId by mutableStateOf<String?>(null);                        private set
 
     private var pollJob: Job? = null
 
     // ── Polling ───────────────────────────────────────────────────────────────
 
-    /**
-     * Starts polling GET /driver/trips/incoming every 5 seconds.
-     * Call this from LaunchedEffect(Unit) in IncomingTripsScreen.
-     * The coroutine is tied to viewModelScope so it stops automatically
-     * when the ViewModel is cleared (screen leaves the back stack).
-     */
     fun startPolling() {
-        if (pollJob?.isActive == true) return   // already polling
+        if (pollJob?.isActive == true) return
         pollJob = viewModelScope.launch {
             while (isActive) {
                 fetchTrips(showLoadingSpinner = trips.isEmpty())
@@ -46,7 +45,6 @@ class IncomingTripsViewModel(private val repository: DriverRepository) : ViewMod
         pollJob = null
     }
 
-    /** Manual pull-to-refresh — always shows spinner */
     fun refresh() {
         viewModelScope.launch { fetchTrips(showLoadingSpinner = true) }
     }
@@ -59,10 +57,37 @@ class IncomingTripsViewModel(private val repository: DriverRepository) : ViewMod
                 errorMessage = null
             }
             .onFailure { e ->
-                // Don't overwrite an existing list with an error on background poll
                 if (trips.isEmpty()) errorMessage = e.message ?: "Failed to load trips"
             }
         if (showLoadingSpinner) isLoading = false
+    }
+
+    // ── Decline candidate ─────────────────────────────────────────────────────
+
+    /**
+     * Driver declines a trip they are the approved candidate for, before offering.
+     * Server immediately excludes the driver, finds the next candidate, and notifies
+     * the rider via FCM + Realtime. On success the card is removed locally without
+     * waiting for the next poll.
+     *
+     * Guards against concurrent declines with [decliningTripId] — only one in-flight
+     * request allowed at a time.
+     */
+    fun declineTrip(tripId: String) {
+        if (decliningTripId != null) return
+        decliningTripId = tripId
+        viewModelScope.launch {
+            repository.declineCandidate(SessionManager.token, tripId)
+                .onSuccess {
+                    // Remove immediately so the driver doesn't see the card again
+                    // before the next poll drops it (server already excluded them).
+                    trips = trips.filter { it.id != tripId }
+                }
+                .onFailure { e ->
+                    showSnack(e.message ?: "Gagal menolak trip — coba lagi")
+                }
+            decliningTripId = null
+        }
     }
 
     // ── Snackbar ──────────────────────────────────────────────────────────────

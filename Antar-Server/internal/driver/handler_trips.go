@@ -94,6 +94,153 @@ func (h *Handler) IncomingTrips(c *gin.Context) {
 	response.Success(c, trips)
 }
 
+// DeclineCandidate handles POST /api/v1/driver/trips/:trip_id/decline-candidate
+// Driver declines a trip they are the approved candidate for, before submitting
+// any offer. Immediately excludes the driver, finds and assigns the next nearest
+// eligible candidate (same SQL as WithdrawOffer / RejectCandidate — keep all four
+// in sync), notifies the rider via FCM, and notifies the next candidate driver.
+// Does NOT increment notification_attempts (reserved for cron-driven timeouts only).
+func (h *Handler) DeclineCandidate(c *gin.Context) {
+	tripID := c.Param("trip_id")
+	driverID, _ := c.Get("userID")
+
+	// Verify driver is the current approved candidate for a requested trip
+	var islandID, vehicleTypeID int
+	var pickupLat, pickupLng float64
+	var riderID string
+	err := h.db.QueryRow(context.Background(),
+		`SELECT island_id, vehicle_type_id,
+		        ST_Y(pickup_location::geometry), ST_X(pickup_location::geometry),
+		        rider_id
+		 FROM trips
+		 WHERE id                  = $1
+		   AND candidate_driver_id = $2
+		   AND candidate_approved  = true
+		   AND status              = 'requested'`,
+		tripID, driverID,
+	).Scan(&islandID, &vehicleTypeID, &pickupLat, &pickupLng, &riderID)
+	if err != nil {
+		response.BadRequest(c, "Trip not found, not in requested status, or you are not the approved candidate")
+		return
+	}
+
+	// Exclude this driver so they won't be reassigned to the same trip
+	if _, err := h.db.Exec(context.Background(),
+		`INSERT INTO trip_driver_exclusions (trip_id, driver_id)
+		 VALUES ($1, $2) ON CONFLICT (trip_id, driver_id) DO NOTHING`,
+		tripID, driverID,
+	); err != nil {
+		slog.Error("DeclineCandidate exclusion insert failed", "error", err)
+		response.InternalError(c)
+		return
+	}
+
+	// Find next nearest eligible candidate — mirrors notify_nearest_driver_on_insert(),
+	// RejectCandidate, and WithdrawOffer exactly. Keep all four in sync.
+	var nextDriverID *string
+	_ = h.db.QueryRow(context.Background(),
+		`SELECT dp.id
+		 FROM driver_profiles dp
+		 JOIN driver_vehicles dv ON dv.id = dp.active_vehicle_id
+		 JOIN islands i ON i.id = $3
+		 WHERE dp.is_online       = true
+		   AND dp.island_id       = $3
+		   AND dp.last_location   IS NOT NULL
+		   AND dv.vehicle_type_id = $4
+		   AND ST_DWithin(dp.last_location, ST_SetSRID(ST_MakePoint($1,$2),4326), i.search_radius_m)
+		   AND NOT EXISTS (
+		       SELECT 1 FROM trip_driver_exclusions e
+		       WHERE e.trip_id = $5 AND e.driver_id = dp.id
+		   )
+		   AND NOT EXISTS (
+		       SELECT 1 FROM trips t2
+		       WHERE (t2.driver_id = dp.id OR t2.offered_by = dp.id)
+		         AND t2.status IN ('offered','agreed','arrived','in_progress')
+		   )
+		 ORDER BY ST_Distance(dp.last_location, ST_SetSRID(ST_MakePoint($1,$2),4326)) ASC
+		 LIMIT 1`,
+		pickupLng, pickupLat, islandID, vehicleTypeID, tripID,
+	).Scan(&nextDriverID)
+
+	// Reset candidate fields — candidate_approved_at NULL so any new candidate's
+	// countdown starts fresh from their own approval time, not a stale timestamp.
+	result, err := h.db.Exec(context.Background(),
+		`UPDATE trips
+		 SET candidate_driver_id   = $1,
+		     candidate_approved    = false,
+		     candidate_approved_at = NULL,
+		     updated_at            = $2
+		 WHERE id                  = $3
+		   AND candidate_driver_id = $4
+		   AND candidate_approved  = true
+		   AND status              = 'requested'`,
+		nextDriverID, time.Now(), tripID, driverID,
+	)
+	if err != nil {
+		slog.Error("DeclineCandidate update failed", "error", err)
+		response.InternalError(c)
+		return
+	}
+	if result.RowsAffected() == 0 {
+		response.BadRequest(c, "Trip state changed — could not decline")
+		return
+	}
+
+	// Notify rider (FCM for backgrounded app — Realtime subscription on the
+	// trips row handles the in-app UI update via candidate_driver_id change).
+	go func() {
+		var riderToken string
+		h.db.QueryRow(context.Background(),
+			`SELECT COALESCE(fcm_token,'') FROM rider_profiles WHERE id = $1`, riderID,
+		).Scan(&riderToken)
+		if riderToken == "" {
+			return
+		}
+		if err := h.fcm.Send(context.Background(), fcm.Message{
+			Token: riderToken,
+			Notification: &fcm.Notification{
+				Title: "Driver Menolak",
+				Body:  "Driver menolak permintaan Anda — mencari driver berikutnya",
+			},
+			Data: map[string]string{
+				"type":    "candidate_declined",
+				"trip_id": tripID,
+			},
+		}); err != nil {
+			slog.Warn("FCM notify rider of candidate decline failed",
+				"trip_id", tripID, "error", err)
+		}
+	}()
+
+	// Notify next candidate driver if one was found
+	if nextDriverID != nil {
+		go func() {
+			var token string
+			h.db.QueryRow(context.Background(),
+				`SELECT COALESCE(fcm_token,'') FROM driver_profiles WHERE id = $1`, *nextDriverID,
+			).Scan(&token)
+			if token == "" {
+				return
+			}
+			if err := h.fcm.Send(context.Background(), fcm.Message{
+				Token: token,
+				Notification: &fcm.Notification{
+					Title: "Ada Permintaan Baru!",
+					Body:  "Ada penumpang yang mencari driver di dekat Anda",
+				},
+				Data: map[string]string{
+					"type":    "new_trip",
+					"trip_id": tripID,
+				},
+			}); err != nil {
+				slog.Warn("FCM notify next candidate after decline failed", "error", err)
+			}
+		}()
+	}
+
+	response.Success(c, gin.H{"message": "Trip declined"})
+}
+
 func (h *Handler) OfferPrice(c *gin.Context) {
 	tripID := c.Param("trip_id")
 	driverID, _ := c.Get("userID")

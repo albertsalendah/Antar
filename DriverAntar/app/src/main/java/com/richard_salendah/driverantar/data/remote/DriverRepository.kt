@@ -89,7 +89,6 @@ class DriverRepository(private val api: DriverApiService) {
 
     // ── Trips ─────────────────────────────────────────────────────────────────
 
-    /** Returns null when no active trip exists (server returns null data). */
     suspend fun getActiveTrip(token: String): Result<DriverTripResponse?> = safeCall {
         api.getActiveTrip(token).unwrapNullable()
     }
@@ -111,15 +110,22 @@ class DriverRepository(private val api: DriverApiService) {
         api.counterOffer(token, tripId, CounterOfferRequest(fare)).unwrapVoid()
     }
 
+    /** Withdraw a pending offer (status=offered) — resets trip to requested and auto-reassigns. */
     suspend fun withdrawOffer(token: String, tripId: String): Result<Unit> = safeCall {
         api.withdrawOffer(token, tripId).unwrapVoid()
     }
-    suspend fun startTrip(token: String, tripId: String): Result<Unit> = safeCall {
-        api.startTrip(token, tripId).unwrapVoid()
+
+    /** Decline a trip before offering (status=requested, driver is approved candidate). */
+    suspend fun declineCandidate(token: String, tripId: String): Result<Unit> = safeCall {
+        api.declineCandidate(token, tripId).unwrapVoid()
     }
 
     suspend fun arriveAtPickup(token: String, tripId: String): Result<Unit> = safeCall {
         api.arriveAtPickup(token, tripId).unwrapVoid()
+    }
+
+    suspend fun startTrip(token: String, tripId: String): Result<Unit> = safeCall {
+        api.startTrip(token, tripId).unwrapVoid()
     }
 
     suspend fun completeTrip(token: String, tripId: String): Result<Unit> = safeCall {
@@ -136,6 +142,7 @@ class DriverRepository(private val api: DriverApiService) {
     }
 
     // ── Earnings ──────────────────────────────────────────────────────────────
+
     suspend fun getDailyEarnings(token: String): Result<List<DailyEarning>> = runCatching {
         val resp = api.getDailyEarnings(token)
         resp.body()?.data ?: emptyList()

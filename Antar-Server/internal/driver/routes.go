@@ -53,6 +53,7 @@ func RegisterRoutes(rg *gin.RouterGroup, h *Handler, cfg *config.Config) {
 		auth.POST("/trips/:trip_id/offer", offerLimiter, h.OfferPrice)
 		auth.POST("/trips/:trip_id/counter", h.CounterOffer)
 		auth.POST("/trips/:trip_id/withdraw-offer", h.WithdrawOffer)
+		auth.POST("/trips/:trip_id/decline-candidate", h.DeclineCandidate)
 		auth.POST("/trips/:trip_id/start", h.StartTrip)
 		auth.POST("/trips/:trip_id/arrive", h.ArriveAtPickup)
 		auth.POST("/trips/:trip_id/complete", h.CompleteTrip)

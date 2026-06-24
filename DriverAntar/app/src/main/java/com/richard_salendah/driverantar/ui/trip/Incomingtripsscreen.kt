@@ -84,17 +84,16 @@ fun IncomingTripsScreen(
         snackbarHost = { SnackbarHost(snackbarHostState) }
     ) { padding ->
 
-        val trips     = viewModel.trips
-        val isLoading = viewModel.isLoading
-        val error     = viewModel.errorMessage
+        val trips          = viewModel.trips
+        val isLoading      = viewModel.isLoading
+        val error          = viewModel.errorMessage
+        val decliningTripId = viewModel.decliningTripId
 
         Column(modifier = Modifier.padding(padding).fillMaxSize()) {
 
-            // ── Offline banner ────────────────────────────────────────────────
             OfflineBanner(visible = !isOnline)
 
             when {
-                // ── Skeleton on first load ────────────────────────────────────
                 isLoading && trips.isEmpty() -> {
                     LazyColumn(
                         contentPadding      = PaddingValues(16.dp),
@@ -105,7 +104,6 @@ fun IncomingTripsScreen(
                     }
                 }
 
-                // ── Error ─────────────────────────────────────────────────────
                 error != null && trips.isEmpty() -> {
                     Box(
                         Modifier.fillMaxSize().padding(24.dp),
@@ -120,14 +118,13 @@ fun IncomingTripsScreen(
                                 color = MaterialTheme.colorScheme.onSurfaceVariant)
                             Spacer(Modifier.height(16.dp))
                             Button(
-                                onClick  = { viewModel.refresh() },
-                                enabled  = isOnline
+                                onClick = { viewModel.refresh() },
+                                enabled = isOnline
                             ) { Text("Try Again") }
                         }
                     }
                 }
 
-                // ── Empty ─────────────────────────────────────────────────────
                 trips.isEmpty() -> {
                     Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                         Column(horizontalAlignment = Alignment.CenterHorizontally) {
@@ -142,7 +139,6 @@ fun IncomingTripsScreen(
                     }
                 }
 
-                // ── List ──────────────────────────────────────────────────────
                 else -> {
                     LazyColumn(
                         modifier            = Modifier.fillMaxSize(),
@@ -158,9 +154,11 @@ fun IncomingTripsScreen(
                         }
                         items(trips, key = { it.id }) { trip ->
                             TripCard(
-                                trip           = trip,
-                                actionsEnabled = isOnline,
-                                onClick        = { if (isOnline) onTripSelected(trip) }
+                                trip             = trip,
+                                actionsEnabled   = isOnline,
+                                isDeclinePending = decliningTripId == trip.id,
+                                onClick          = { if (isOnline) onTripSelected(trip) },
+                                onDecline        = { viewModel.declineTrip(trip.id) }
                             )
                         }
                         item { Spacer(Modifier.height(72.dp)) }
@@ -172,16 +170,12 @@ fun IncomingTripsScreen(
 }
 
 // ── Candidate countdown ───────────────────────────────────────────────────────
-// Mirrors the live process_trip_notification_timeouts() 3-minute candidate
-// window (verified via Supabase MCP, not hardcoded from memory). Purely a
-// local visual cue — no action is triggered at zero. The trip naturally
-// disappears once the cron job (runs every 60s) actually reassigns it and
-// the next 5s poll refreshes the list.
+// 3-minute window verified live against process_trip_notification_timeouts()
+// via Supabase MCP. Purely local/cosmetic — no API call on expiry.
 
 private const val CANDIDATE_WINDOW_SECONDS = 180
-private const val FADE_WARNING_SECONDS     = 30   // last 30s — fade + countdown turns red
+private const val FADE_WARNING_SECONDS     = 30
 
-/** Parses a Postgres timestamptz::text value (space- or 'T'-separated, with/without offset) as UTC epoch millis. */
 private fun parseUtcEpochMillis(raw: String): Long? = try {
     val cleaned = raw.replace(' ', 'T').substringBefore("+").substringBefore("Z").take(19)
     SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss", Locale.US).apply {
@@ -189,19 +183,16 @@ private fun parseUtcEpochMillis(raw: String): Long? = try {
     }.parse(cleaned)?.time
 } catch (e: Exception) { null }
 
-/** Ticks every second. Returns null if [approvedAt] is null/unparseable (countdown simply isn't shown). */
 @Composable
 private fun rememberCandidateRemainingSeconds(approvedAt: String?): Int? {
     if (approvedAt == null) return null
     val approvedAtMillis = remember(approvedAt) { parseUtcEpochMillis(approvedAt) } ?: return null
-
     var remaining by remember(approvedAt) {
         mutableStateOf(
             (CANDIDATE_WINDOW_SECONDS - (System.currentTimeMillis() - approvedAtMillis) / 1000).toInt()
         )
     }
     LaunchedEffect(approvedAt) {
-        // Stop ticking shortly after expiry — the card will be gone on the next poll anyway
         while (remaining > -2) {
             delay(1_000L)
             remaining = (CANDIDATE_WINDOW_SECONDS - (System.currentTimeMillis() - approvedAtMillis) / 1000).toInt()
@@ -221,15 +212,20 @@ private fun formatCountdown(seconds: Int): String {
 private fun TripCard(
     trip: IncomingTripResponse,
     actionsEnabled: Boolean,
-    onClick: () -> Unit
+    isDeclinePending: Boolean,
+    onClick: () -> Unit,
+    onDecline: () -> Unit
 ) {
     val isErrand         = trip.trip_type == "errand"
     val remainingSeconds = rememberCandidateRemainingSeconds(trip.candidate_approved_at)
     val expired          = remainingSeconds != null && remainingSeconds <= 0
+    // Card is interactive only when online, not expired, and no decline in flight
+    val interactive      = actionsEnabled && !expired && !isDeclinePending
 
     val cardAlpha by animateFloatAsState(
         targetValue = when {
-            remainingSeconds == null || remainingSeconds > FADE_WARNING_SECONDS -> 1f
+            isDeclinePending                                                      -> 0.6f
+            remainingSeconds == null || remainingSeconds > FADE_WARNING_SECONDS   -> 1f
             else -> 0.4f + 0.6f * (remainingSeconds.coerceAtLeast(0) / FADE_WARNING_SECONDS.toFloat())
         },
         label = "tripCardFade"
@@ -237,7 +233,7 @@ private fun TripCard(
 
     Card(
         onClick   = onClick,
-        enabled   = actionsEnabled && !expired,
+        enabled   = interactive,
         modifier  = Modifier.fillMaxWidth().alpha(cardAlpha),
         elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
     ) {
@@ -261,6 +257,16 @@ private fun TripCard(
                         modifier = Modifier
                             .clip(RoundedCornerShape(50))
                             .background(MaterialTheme.colorScheme.surfaceVariant)
+                            .padding(horizontal = 8.dp, vertical = 3.dp)
+                    )
+                    // Payment method shown here to keep footer uncluttered
+                    Text(
+                        trip.payment_method.replaceFirstChar { it.uppercase() },
+                        style    = MaterialTheme.typography.labelSmall,
+                        color    = MaterialTheme.colorScheme.onTertiaryContainer,
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(50))
+                            .background(MaterialTheme.colorScheme.tertiaryContainer)
                             .padding(horizontal = 8.dp, vertical = 3.dp)
                     )
                 }
@@ -335,7 +341,7 @@ private fun TripCard(
             HorizontalDivider()
             Spacer(Modifier.height(10.dp))
 
-            // ── Footer: fare + payment + action button ────────────────────────
+            // ── Footer: fare | Tolak + Terima ─────────────────────────────────
             Row(
                 modifier              = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
@@ -354,22 +360,33 @@ private fun TripCard(
                     verticalAlignment     = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    Text(
-                        trip.payment_method.replaceFirstChar { it.uppercase() },
-                        style    = MaterialTheme.typography.labelSmall,
-                        modifier = Modifier
-                            .clip(RoundedCornerShape(50))
-                            .background(MaterialTheme.colorScheme.tertiaryContainer)
-                            .padding(horizontal = 8.dp, vertical = 3.dp),
-                        color    = MaterialTheme.colorScheme.onTertiaryContainer
-                    )
+                    // Tolak — calls decline-candidate endpoint directly
+                    OutlinedButton(
+                        onClick        = onDecline,
+                        enabled        = interactive,
+                        contentPadding = PaddingValues(horizontal = 14.dp, vertical = 6.dp),
+                        colors         = ButtonDefaults.outlinedButtonColors(
+                            contentColor = MaterialTheme.colorScheme.error
+                        )
+                    ) {
+                        if (isDeclinePending) {
+                            CircularProgressIndicator(
+                                modifier    = Modifier.size(14.dp),
+                                strokeWidth = 2.dp,
+                                color       = MaterialTheme.colorScheme.error
+                            )
+                        } else {
+                            Text("Tolak", style = MaterialTheme.typography.labelMedium)
+                        }
+                    }
+                    // Terima — navigates to OfferPriceScreen
                     Button(
                         onClick        = onClick,
-                        enabled        = actionsEnabled && !expired,
-                        contentPadding = PaddingValues(horizontal = 16.dp, vertical = 6.dp)
+                        enabled        = interactive,
+                        contentPadding = PaddingValues(horizontal = 14.dp, vertical = 6.dp)
                     ) {
                         Text(
-                            if (expired) "Kedaluwarsa" else "Tawar",
+                            if (expired) "Kedaluwarsa" else "Terima",
                             style = MaterialTheme.typography.labelMedium
                         )
                     }
@@ -381,12 +398,6 @@ private fun TripCard(
 
 // ── Rider avatar row ──────────────────────────────────────────────────────────
 
-/**
- * Small circular avatar + rider name shown on the TripCard.
- * Falls back to a generic person icon when [avatarUrl] is null (new rider
- * who hasn't uploaded a photo yet). Coil cache disabled — same policy as
- * ProfileScreen — so a recently changed avatar isn't stale.
- */
 @Composable
 private fun RiderAvatarRow(avatarUrl: String?, name: String) {
     val context = LocalContext.current

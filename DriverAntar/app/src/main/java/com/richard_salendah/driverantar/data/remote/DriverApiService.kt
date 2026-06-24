@@ -20,7 +20,6 @@ interface DriverApiService {
 
     // ── Device (protected) ────────────────────────────────────────────────────
 
-    /** Must be called after every login and whenever onNewToken() fires */
     @POST("api/v1/driver/fcm-token")
     suspend fun saveFcmToken(
         @Header("Authorization") token: String,
@@ -86,22 +85,12 @@ interface DriverApiService {
 
     // ── Trips (protected) — static routes first ───────────────────────────────
 
-    /**
-     * Recovery endpoint — called on every app start and resume.
-     * Returns the driver's current active trip (offered/agreed/in_progress),
-     * or null if no active trip exists.
-     */
     @GET("api/v1/driver/trips/active")
     suspend fun getActiveTrip(@Header("Authorization") token: String): Response<ApiResponse<DriverTripResponse?>>
 
-    /**
-     * Incoming trips on the driver's island matching their active vehicle type.
-     * Driver polls this to see open requests.
-     */
     @GET("api/v1/driver/trips/incoming")
     suspend fun getIncomingTrips(@Header("Authorization") token: String): Response<ApiResponse<List<IncomingTripResponse>>>
 
-    /** Full trip history — completed and cancelled. Supports ?limit=&offset= */
     @GET("api/v1/driver/trips")
     suspend fun listTrips(
         @Header("Authorization") token: String,
@@ -111,7 +100,6 @@ interface DriverApiService {
 
     // ── Trips (protected) — per-trip actions ──────────────────────────────────
 
-    /** Driver proposes a price. Atomic lock — first driver to offer wins. */
     @POST("api/v1/driver/trips/{trip_id}/offer")
     suspend fun offerPrice(
         @Header("Authorization") token: String,
@@ -119,7 +107,6 @@ interface DriverApiService {
         @Body request: OfferPriceRequest
     ): Response<ApiResponse<Unit>>
 
-    /** Driver counters after rider has submitted a counter-offer. */
     @POST("api/v1/driver/trips/{trip_id}/counter")
     suspend fun counterOffer(
         @Header("Authorization") token: String,
@@ -127,16 +114,16 @@ interface DriverApiService {
         @Body request: CounterOfferRequest
     ): Response<ApiResponse<Unit>>
 
-    /** Driver withdraws their pending offer — trip resets to requested and may auto-reassign to the next nearest candidate. */
+    /** Driver withdraws a pending offer (status=offered) — resets to requested and auto-reassigns. */
     @POST("api/v1/driver/trips/{trip_id}/withdraw-offer")
     suspend fun withdrawOffer(
         @Header("Authorization") token: String,
         @Path("trip_id") tripId: String
     ): Response<ApiResponse<Unit>>
 
-    /** Moves trip from agreed → in_progress. Driver taps when arriving at pickup. */
-    @POST("api/v1/driver/trips/{trip_id}/start")
-    suspend fun startTrip(
+    /** Driver declines a trip before submitting an offer (status=requested, approved candidate). */
+    @POST("api/v1/driver/trips/{trip_id}/decline-candidate")
+    suspend fun declineCandidate(
         @Header("Authorization") token: String,
         @Path("trip_id") tripId: String
     ): Response<ApiResponse<Unit>>
@@ -147,21 +134,24 @@ interface DriverApiService {
         @Path("trip_id") tripId: String
     ): Response<ApiResponse<Unit>>
 
-    /** Moves trip from in_progress → completed. */
+    @POST("api/v1/driver/trips/{trip_id}/start")
+    suspend fun startTrip(
+        @Header("Authorization") token: String,
+        @Path("trip_id") tripId: String
+    ): Response<ApiResponse<Unit>>
+
     @POST("api/v1/driver/trips/{trip_id}/complete")
     suspend fun completeTrip(
         @Header("Authorization") token: String,
         @Path("trip_id") tripId: String
     ): Response<ApiResponse<Unit>>
 
-    /** Driver cancels — only allowed when status = agreed (before start). */
     @POST("api/v1/driver/trips/{trip_id}/cancel")
     suspend fun cancelTrip(
         @Header("Authorization") token: String,
         @Path("trip_id") tripId: String
     ): Response<ApiResponse<Unit>>
 
-    /** Rate the rider after trip completion. One submission per trip. */
     @POST("api/v1/driver/trips/{trip_id}/rate")
     suspend fun rateRider(
         @Header("Authorization") token: String,
@@ -170,6 +160,7 @@ interface DriverApiService {
     ): Response<ApiResponse<Unit>>
 
     // ── Earnings (protected) ──────────────────────────────────────────────────
+
     @GET("api/v1/driver/earnings/daily")
     suspend fun getDailyEarnings(
         @Header("Authorization") token: String
