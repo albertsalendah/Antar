@@ -42,6 +42,10 @@ fun AntarNavGraph(
                     navController.navigate(Screen.ActiveTrip.route(event.tripId)) {
                         launchSingleTop = true
                     }
+                is DeepLinkEvent.ToCandidateReview ->
+                    navController.navigate(Screen.CandidateReview.route(event.tripId)) {
+                        launchSingleTop = true
+                    }
             }
         }
     }

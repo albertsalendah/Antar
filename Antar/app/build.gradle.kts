@@ -31,7 +31,7 @@ android {
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
         // Read server config from local.properties — never hard-code in source
-        buildConfigField("String", "BASE_URL",        "\"${localProps["BASE_URL"]}\"")
+        buildConfigField("String", "BASE_URL",        "\"${localProps["BASE_URL"] ?: "http://10.0.2.2:8000/"}\"")
         buildConfigField("String", "SUPABASE_URL",     "\"${localProps["SUPABASE_URL"]}\"")
         buildConfigField("String", "SUPABASE_ANON_KEY","\"${localProps["SUPABASE_ANON_KEY"]}\"")
     }

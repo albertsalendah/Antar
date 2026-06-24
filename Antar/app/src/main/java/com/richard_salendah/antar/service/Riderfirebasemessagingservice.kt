@@ -3,7 +3,6 @@ package com.richard_salendah.antar.service
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Intent
-import android.os.Bundle
 import androidx.core.app.NotificationCompat
 import com.google.firebase.messaging.FirebaseMessagingService
 import com.google.firebase.messaging.RemoteMessage
@@ -51,12 +50,17 @@ class RiderFirebaseMessagingService : FirebaseMessagingService() {
     // ── Foreground routing ────────────────────────────────────────────────────
 
     private fun routeInApp(type: String, tripId: String) {
-        val event = when (type) {
+        val event: DeepLinkEvent? = when (type) {
             "driver_offer",
-            "driver_counter" -> if (tripId.isNotEmpty()) DeepLinkEvent.ToNegotiation(tripId) else null
-            "offer_accepted" -> if (tripId.isNotEmpty()) DeepLinkEvent.ToActiveTrip(tripId)  else null
-            "driver_arrived" -> if (tripId.isNotEmpty()) DeepLinkEvent.ToActiveTrip(tripId) else null
-            else             -> null
+            "driver_counter"    -> if (tripId.isNotEmpty()) DeepLinkEvent.ToNegotiation(tripId)    else null
+            "offer_accepted",
+            "driver_arrived"    -> if (tripId.isNotEmpty()) DeepLinkEvent.ToActiveTrip(tripId)     else null
+            // When a driver declines the rider's request, emit ToCandidateReview so the
+            // rider is taken to (or kept on) the CandidateReview screen to see the new
+            // candidate. The Realtime subscription on the trip row handles the actual
+            // UI update; this emission is a safety net in case the rider navigated away.
+            "candidate_declined" -> if (tripId.isNotEmpty()) DeepLinkEvent.ToCandidateReview(tripId) else null
+            else                -> null
         }
         event?.let { DeepLinkHandler.emit(it) }
     }
@@ -64,7 +68,6 @@ class RiderFirebaseMessagingService : FirebaseMessagingService() {
     // ── Background notification ───────────────────────────────────────────────
 
     private fun showNotification(title: String, body: String, type: String, tripId: String) {
-        // Build an Intent that MainActivity will inspect in onCreate / onNewIntent
         val intent = Intent(this, MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
             putExtra(EXTRA_FCM_TYPE,    type)
@@ -94,11 +97,12 @@ class RiderFirebaseMessagingService : FirebaseMessagingService() {
         (application as Antar).isForeground
 
     private fun titleFor(type: String) = when (type) {
-        "driver_offer"   -> "Ada Penawaran Harga!"
-        "driver_counter" -> "Driver Balik Menawar!"
-        "offer_accepted" -> "Penawaran Diterima!"
-        "driver_arrived" -> "Driver Sudah Tiba!"
-        else             -> "Antar"
+        "driver_offer"       -> "Ada Penawaran Harga!"
+        "driver_counter"     -> "Driver Balik Menawar!"
+        "offer_accepted"     -> "Penawaran Diterima!"
+        "driver_arrived"     -> "Driver Sudah Tiba!"
+        "candidate_declined" -> "Driver Menolak"
+        else                 -> "Antar"
     }
 
     companion object {

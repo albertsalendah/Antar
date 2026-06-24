@@ -70,6 +70,7 @@ class MainActivity : ComponentActivity() {
             "driver_offer",
             "driver_counter" -> DeepLinkEvent.ToNegotiation(tripId)
             "offer_accepted" -> DeepLinkEvent.ToActiveTrip(tripId)
+            "candidate_declined" -> DeepLinkEvent.ToCandidateReview(tripId)
             else             -> null
         }
         event?.let { DeepLinkHandler.emit(it) }

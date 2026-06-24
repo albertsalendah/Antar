@@ -11,6 +11,7 @@ sealed class DeepLinkEvent {
     data class ToNegotiation(val tripId: String) : DeepLinkEvent()
     /** Rider's offer was accepted — go to ActiveTripScreen */
     data class ToActiveTrip(val tripId: String) : DeepLinkEvent()
+    data class ToCandidateReview(val tripId: String) : DeepLinkEvent()
 }
 
 // ── Handler singleton ─────────────────────────────────────────────────────────
