@@ -298,10 +298,19 @@ func (h *Handler) GetRejectedDrivers(c *gin.Context) {
 	response.Success(c, drivers)
 }
 
-// ReselectDriver handles POST /api/v1/rider/trips/:trip_id/reselect-driver
-// Only callable when candidate_driver_id IS NULL (decision #8 — "No Driver
-// Found" screen only). Re-validates availability, then assigns and
-// auto-approves immediately — no second review step.
+// ── REPLACE ReselectDriver in Antar-Server/internal/rider/handler_candidate.go ──
+//
+// Change summary [edge case fix]:
+//   - Previous: blocked if candidate_driver_id IS NOT NULL (any existing candidate).
+//   - Fixed:    blocks only when candidate_driver_id IS NOT NULL AND candidate_approved = true.
+//   - Reason:   after DeclineCandidate or WithdrawOffer, the server assigns the next
+//               candidate with candidate_approved = false and does NOT notify them.
+//               If the rider taps Stop → NoDriverFound → tries to reselect, there may
+//               be a dangling unapproved candidate blocking the call with a false
+//               "A candidate is already assigned" error.
+//               An unapproved candidate was never notified, so silently excluding them
+//               and proceeding causes no UX harm to the driver.
+
 func (h *Handler) ReselectDriver(c *gin.Context) {
 	tripID := c.Param("trip_id")
 	riderID, _ := c.Get("userID")
@@ -314,18 +323,37 @@ func (h *Handler) ReselectDriver(c *gin.Context) {
 
 	var vehicleTypeID int
 	var candidateDriverID *string
+	var candidateApproved bool
 	err := h.db.QueryRow(context.Background(),
-		`SELECT vehicle_type_id, candidate_driver_id FROM trips
+		`SELECT vehicle_type_id, candidate_driver_id, candidate_approved FROM trips
 		 WHERE id = $1 AND rider_id = $2 AND status = 'requested'`,
 		tripID, riderID,
-	).Scan(&vehicleTypeID, &candidateDriverID)
+	).Scan(&vehicleTypeID, &candidateDriverID, &candidateApproved)
 	if err != nil {
 		response.NotFound(c, "Trip not found or no longer requested")
 		return
 	}
-	if candidateDriverID != nil {
+
+	// Block only if there is an actively approved candidate (they're already
+	// waiting for a driver response). An unapproved candidate was never notified
+	// so we can silently exclude them and proceed.
+	if candidateDriverID != nil && candidateApproved {
 		response.BadRequest(c, "A candidate is already assigned to this trip")
 		return
+	}
+
+	// Silently exclude a dangling unapproved candidate (assigned by server after
+	// a decline/withdraw, never notified because rider chose Stop before approving).
+	if candidateDriverID != nil && !candidateApproved {
+		if _, err := h.db.Exec(context.Background(),
+			`INSERT INTO trip_driver_exclusions (trip_id, driver_id)
+			 VALUES ($1, $2) ON CONFLICT (trip_id, driver_id) DO NOTHING`,
+			tripID, *candidateDriverID,
+		); err != nil {
+			slog.Error("ReselectDriver unapproved candidate exclusion failed", "error", err)
+			response.InternalError(c)
+			return
+		}
 	}
 
 	var wasExcluded bool
@@ -358,13 +386,16 @@ func (h *Handler) ReselectDriver(c *gin.Context) {
 		return
 	}
 
+	// WHERE clause accepts both NULL and unapproved-false states — covers the
+	// case where we just cleared a dangling unapproved candidate above.
 	result, err := h.db.Exec(context.Background(),
 		`UPDATE trips
 		 SET candidate_driver_id   = $1,
 		     candidate_approved    = true,
 		     candidate_approved_at = $2,
 		     updated_at            = $2
-		 WHERE id = $3 AND rider_id = $4 AND candidate_driver_id IS NULL`,
+		 WHERE id = $3 AND rider_id = $4
+		   AND (candidate_driver_id IS NULL OR candidate_approved = false)`,
 		req.DriverID, time.Now(), tripID, riderID,
 	)
 	if err != nil {

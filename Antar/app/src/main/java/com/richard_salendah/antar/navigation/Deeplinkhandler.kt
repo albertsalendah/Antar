@@ -11,7 +11,11 @@ sealed class DeepLinkEvent {
     data class ToNegotiation(val tripId: String) : DeepLinkEvent()
     /** Rider's offer was accepted — go to ActiveTripScreen */
     data class ToActiveTrip(val tripId: String) : DeepLinkEvent()
-    data class ToCandidateReview(val tripId: String) : DeepLinkEvent()
+    /** Candidate assigned or changed — go to CandidateReviewScreen.
+     *  reason = "declined" when arriving via background FCM tap after a driver decline [R1, R7] */
+    data class ToCandidateReview(val tripId: String, val reason: String = "") : DeepLinkEvent()
+    /** Driver withdrew their price offer — go to NegotiationScreen with popup pre-armed [R2, R7] */
+    data class ToNegotiationWithReason(val tripId: String, val reason: String) : DeepLinkEvent()
 }
 
 // ── Handler singleton ─────────────────────────────────────────────────────────
@@ -20,7 +24,7 @@ sealed class DeepLinkEvent {
  * Bridges FCM/notification tap events (from Service or Activity) to
  * the NavGraph which observes [events] and performs the navigation.
  *
- * extraBufferCapacity = 1 ensures an event emitted before the NavGraph
+ * extraBufferCapacity = 4 ensures an event emitted before the NavGraph
  * subscribes is not lost (e.g. cold start from notification tap).
  */
 object DeepLinkHandler {

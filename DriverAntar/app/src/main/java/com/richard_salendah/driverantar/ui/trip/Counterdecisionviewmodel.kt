@@ -34,15 +34,9 @@ class CounterDecisionViewModel(
         private const val STEP = 1_000.0
     }
 
-    /** Driver's counter fare — starts at their last offered price (riderFare + step as suggestion) */
-    var counterFare by mutableStateOf(
-        // Round up to nearest 1000 above rider's offer as a starting suggestion
-        riderFare + STEP
-    ); private set
-
+    var counterFare by mutableStateOf(riderFare + STEP); private set
     var state by mutableStateOf<CounterDecisionState>(CounterDecisionState.Idle); private set
 
-    /** Driver still has counter attempts remaining */
     val canCounter: Boolean get() = driverCounterCount < maxDriverCounters
     val isBelowFloor: Boolean get() = counterFare < defaultFare
     val canDecrement: Boolean get() = counterFare - STEP >= defaultFare
@@ -54,32 +48,12 @@ class CounterDecisionViewModel(
     // ── Actions ───────────────────────────────────────────────────────────────
 
     /**
-     * Driver accepts the rider's counter-offer price.
-     * Server: POST /trips/:id/accept would be for riders — here we use a
-     * special accept path. Actually the driver accepting the rider's counter
-     * is done by posting a counter equal to riderFare, which the server
-     * interprets as agreement when last_offer_by becomes driver and the price
-     * matches. In practice the server sets status=agreed on AcceptOffer.
-     *
-     * The correct server call for the driver accepting is:
-     *   Not a dedicated endpoint — driver posts counter = riderFare (matching price),
-     *   which in the negotiation model means agreement from the driver's side.
-     *   The server's CounterOffer handler updates last_offer_by=driver.
-     *   Then the rider must accept one final time.
-     *
-     * HOWEVER — looking at the server handler again, there's no driver-accept
-     * endpoint distinct from counter. The simplest correct flow is:
-     *   Driver counter with riderFare amount = effectively accepting their price.
-     *   Rider then sees last_offer_by=driver and accepts.
-     *
-     * Simpler UX alternative implemented here:
-     *   "Accept" button posts counterFare = riderFare to /counter.
-     *   This signals to the rider that the driver matches their price.
+     * Driver matches rider's price by counter-offering the same amount.
+     * Server sets last_offer_by='driver'; rider then accepts one final time.
      */
     fun acceptRiderOffer() {
         viewModelScope.launch {
             state = CounterDecisionState.Loading
-            // Post the rider's fare as our counter (signals agreement at that price)
             repository.counterOffer(SessionManager.token, tripId, riderFare)
                 .onSuccess { state = CounterDecisionState.Countered(riderFare) }
                 .onFailure { e -> state = CounterDecisionState.Error(e.message ?: "Failed") }
@@ -92,22 +66,65 @@ class CounterDecisionViewModel(
             state = CounterDecisionState.Loading
             repository.counterOffer(SessionManager.token, tripId, counterFare)
                 .onSuccess { state = CounterDecisionState.Countered(counterFare) }
-                .onFailure { e -> state = CounterDecisionState.Error(e.message ?: "Failed to counter") }
+                .onFailure { e ->
+                    state = CounterDecisionState.Error(e.message ?: "Failed to counter")
+                }
         }
     }
 
     /**
      * Driver rejects the rider's counter-offer.
-     * Server resets the trip to 'requested' so another driver can offer fresh.
-     * Client navigates back to IncomingTrips.
+     * Calls WithdrawOffer server-side which resets the trip to 'requested'.
+     *
+     * RACE-WITHDRAW fix: mirrors the same fix applied to WaitingForRiderViewModel.
+     * If withdrawOffer returns a 400 ("Trip state changed"), the rider most likely
+     * accepted the driver's previous counter-offer in the same instant — the server's
+     * atomic UPDATE...WHERE lost the race. The trip is already 'agreed'.
+     *
+     * On failure: fetch the authoritative trip state and react accordingly:
+     *   - agreed  → Accepted (navigate to WaitingForRider, which immediately sees Agreed)
+     *   - no active trip / requested / cancelled → Rejected (back to IncomingTrips)
+     *   - fetch fails or unexpected state → Error (original message, unchanged behaviour)
      */
     fun rejectAndReset() {
         viewModelScope.launch {
             state = CounterDecisionState.Loading
             repository.withdrawOffer(SessionManager.token, tripId)
                 .onSuccess { state = CounterDecisionState.Rejected }
-                .onFailure { e -> state = CounterDecisionState.Error(e.message ?: "Failed to reject") }
+                .onFailure { e ->
+                    reconcileAfterWithdrawFailure(e.message ?: "Failed to reject")
+                }
         }
+    }
+
+    private suspend fun reconcileAfterWithdrawFailure(originalMessage: String) {
+        repository.getActiveTrip(SessionManager.token)
+            .onSuccess { trip ->
+                state = when {
+                    trip != null && trip.id == tripId && trip.status == "agreed" -> {
+                        // Rider had already accepted the driver's last counter-offer.
+                        // Move forward to WaitingForRider, which will immediately
+                        // detect Agreed via its own poll/Realtime and go to ActiveTrip.
+                        CounterDecisionState.Accepted
+                    }
+                    trip == null || trip.id != tripId -> {
+                        // No active trip → trip was reset or cancelled independently.
+                        CounterDecisionState.Rejected
+                    }
+                    trip.status == "requested" || trip.status == "cancelled" -> {
+                        // Withdraw partially succeeded in resetting the trip.
+                        CounterDecisionState.Rejected
+                    }
+                    else -> {
+                        // Unexpected state — fall back to the original error message.
+                        CounterDecisionState.Error(originalMessage)
+                    }
+                }
+            }
+            .onFailure {
+                // getActiveTrip itself failed (network down etc.) — show original error.
+                state = CounterDecisionState.Error(originalMessage)
+            }
     }
 
     fun clearError() { state = CounterDecisionState.Idle }

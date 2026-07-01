@@ -68,10 +68,11 @@ class MainActivity : ComponentActivity() {
 
         val event = when (type) {
             "driver_offer",
-            "driver_counter" -> DeepLinkEvent.ToNegotiation(tripId)
-            "offer_accepted" -> DeepLinkEvent.ToActiveTrip(tripId)
-            "candidate_declined" -> DeepLinkEvent.ToCandidateReview(tripId)
-            else             -> null
+            "driver_counter"     -> DeepLinkEvent.ToNegotiation(tripId)
+            "offer_accepted"     -> DeepLinkEvent.ToActiveTrip(tripId)
+            "candidate_declined" -> DeepLinkEvent.ToCandidateReview(tripId, reason = "declined")
+            "driver_withdrew"    -> DeepLinkEvent.ToNegotiationWithReason(tripId, reason = "withdrew")
+            else                 -> null
         }
         event?.let { DeepLinkHandler.emit(it) }
     }

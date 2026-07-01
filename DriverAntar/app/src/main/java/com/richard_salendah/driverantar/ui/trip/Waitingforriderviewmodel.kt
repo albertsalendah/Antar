@@ -181,41 +181,82 @@ class WaitingForRiderViewModel(
         viewModelScope.launch {
             repository.withdrawOffer(SessionManager.token, tripId)
                 .onSuccess {
-                    pollJob?.cancel()
-                    pollJob = null
-                    try {
-                        realtimeChannel?.let { ch ->
-                            ch.unsubscribe()
-                            SupabaseClientHolder.client.realtime.removeChannel(ch)
-                        }
-                    } catch (e: Exception) {
-                        Log.w(TAG, "Error cleaning up Realtime channel after withdraw", e)
-                    }
+                    teardownWatchers()
                     uiState = WaitingUiState.Withdrawn
                 }
                 .onFailure { e ->
+                    // RACE-WITHDRAW fix: a 400 here ("Trip state changed — could not
+                    // withdraw") almost always means the rider accepted (or otherwise
+                    // changed the trip) in the same instant the driver tapped Withdraw —
+                    // the server's atomic UPDATE...WHERE simply lost the race. The trip
+                    // itself is fine; only this specific withdraw request failed.
+                    //
+                    // Instead of stranding the driver on a dead-end error screen, ask the
+                    // server what's actually true right now and react to that, mirroring
+                    // the same trip == null → Rejected mapping startPolling() already uses.
+                    Log.w(TAG, "withdrawOffer failed — reconciling with server state", e)
                     isWithdrawing = false
-                    uiState = WaitingUiState.Error(e.message ?: "Failed to withdraw offer")
+                    reconcileAfterWithdrawFailure(e.message ?: "Failed to withdraw offer")
                 }
         }
     }
 
+    /**
+     * Fetches the authoritative trip state after a failed withdraw and maps it
+     * to the correct terminal UiState instead of showing a raw error.
+     *   - status == "agreed" (rider accepted first) → Agreed, same as normal flow
+     *   - no active trip found (rider rejected / reset independently)  → Rejected
+     *   - fetch itself fails, or trip is in some other unexpected state → Error,
+     *     using the original server message as a fallback
+     */
+    private suspend fun reconcileAfterWithdrawFailure(originalMessage: String) {
+        repository.getActiveTrip(SessionManager.token)
+            .onSuccess { trip ->
+                when {
+                    trip != null && trip.id == tripId && trip.status == "agreed" -> {
+                        Log.d(TAG, "Reconcile: rider had already accepted — moving to Agreed")
+                        teardownWatchers()
+                        uiState = WaitingUiState.Agreed
+                    }
+                    trip == null -> {
+                        Log.d(TAG, "Reconcile: no active trip — treating as rejected")
+                        teardownWatchers()
+                        uiState = WaitingUiState.Rejected
+                    }
+                    else -> {
+                        Log.w(TAG, "Reconcile: unexpected trip state ${trip.status} — showing error")
+                        uiState = WaitingUiState.Error(originalMessage)
+                    }
+                }
+            }
+            .onFailure {
+                Log.w(TAG, "Reconcile: getActiveTrip also failed — showing original error", it)
+                uiState = WaitingUiState.Error(originalMessage)
+            }
+    }
+
     // ── Cleanup ───────────────────────────────────────────────────────────────
 
-    override fun onCleared() {
-        super.onCleared()
+    /** Stops Realtime + polling. Always call BEFORE setting a terminal uiState
+     *  so a late server signal can't race in and overwrite it afterwards. */
+    private fun teardownWatchers() {
         pollJob?.cancel()
+        pollJob = null
         viewModelScope.launch {
             try {
                 realtimeChannel?.let { ch ->
                     ch.unsubscribe()
                     SupabaseClientHolder.client.realtime.removeChannel(ch)
-                    Log.d(TAG, "Unsubscribed channel for trip $tripId")
                 }
             } catch (e: Exception) {
                 Log.w(TAG, "Error cleaning up Realtime channel", e)
             }
         }
+    }
+
+    override fun onCleared() {
+        super.onCleared()
+        teardownWatchers()
     }
 
     companion object {

@@ -35,15 +35,11 @@ class RiderFirebaseMessagingService : FirebaseMessagingService() {
         val title  = message.notification?.title ?: titleFor(type)
         val body   = message.notification?.body  ?: ""
 
-        // If app is in the foreground, emit directly to NavGraph instead of
-        // posting a system notification — avoids a disruptive heads-up popup.
         if (isAppInForeground()) {
             routeInApp(type, tripId)
             return
         }
 
-        // App is in background — post a notification whose tap will route
-        // the user to the correct screen via MainActivity + DeepLinkHandler.
         showNotification(title, body, type, tripId)
     }
 
@@ -52,15 +48,17 @@ class RiderFirebaseMessagingService : FirebaseMessagingService() {
     private fun routeInApp(type: String, tripId: String) {
         val event: DeepLinkEvent? = when (type) {
             "driver_offer",
-            "driver_counter"    -> if (tripId.isNotEmpty()) DeepLinkEvent.ToNegotiation(tripId)    else null
+            "driver_counter" -> if (tripId.isNotEmpty()) DeepLinkEvent.ToNegotiation(tripId) else null
             "offer_accepted",
-            "driver_arrived"    -> if (tripId.isNotEmpty()) DeepLinkEvent.ToActiveTrip(tripId)     else null
-            // When a driver declines the rider's request, emit ToCandidateReview so the
-            // rider is taken to (or kept on) the CandidateReview screen to see the new
-            // candidate. The Realtime subscription on the trip row handles the actual
-            // UI update; this emission is a safety net in case the rider navigated away.
-            "candidate_declined" -> if (tripId.isNotEmpty()) DeepLinkEvent.ToCandidateReview(tripId) else null
-            else                -> null
+            "driver_arrived" -> if (tripId.isNotEmpty()) DeepLinkEvent.ToActiveTrip(tripId) else null
+            // candidate_declined and driver_withdrew: when the app is foreground the
+            // ViewModel already owns the popup via its Realtime/polling subscription.
+            // Emitting here would cause a double-trigger. Background-only: handled
+            // via showNotification() → MainActivity.handleFcmIntent() → DeepLinkHandler.
+            // [R1, R2] — no foreground emit for these two types.
+            "candidate_declined",
+            "driver_withdrew" -> null
+            else -> null
         }
         event?.let { DeepLinkHandler.emit(it) }
     }
@@ -102,6 +100,7 @@ class RiderFirebaseMessagingService : FirebaseMessagingService() {
         "offer_accepted"     -> "Penawaran Diterima!"
         "driver_arrived"     -> "Driver Sudah Tiba!"
         "candidate_declined" -> "Driver Menolak"
+        "driver_withdrew"    -> "Driver Menarik Penawaran"
         else                 -> "Antar"
     }
 

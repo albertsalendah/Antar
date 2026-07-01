@@ -16,8 +16,8 @@ sealed class Screen(val route: String) {
     // CandidateReview replaces Searching as the primary post-booking destination.
     // Rider reviews the suggested driver, approves/rejects, then waits for the
     // driver to make an offer. Searching is kept for legacy deep-link compatibility.
-    object CandidateReview : Screen("candidate_review/{tripId}") {
-        fun route(tripId: String) = "candidate_review/$tripId"
+    object CandidateReview : Screen("candidate_review/{tripId}?reason={reason}") {
+        fun route(tripId: String, reason: String = "") = "candidate_review/$tripId?reason=$reason"
     }
     object NoDriverFound : Screen("no_driver_found/{tripId}") {
         fun route(tripId: String) = "no_driver_found/$tripId"
@@ -25,8 +25,8 @@ sealed class Screen(val route: String) {
     object Searching : Screen("searching/{tripId}") {
         fun route(tripId: String) = "searching/$tripId"
     }
-    object Negotiation : Screen("negotiation/{tripId}") {
-        fun route(tripId: String) = "negotiation/$tripId"
+    object Negotiation : Screen("negotiation/{tripId}?reason={reason}") {
+        fun route(tripId: String, reason: String = "") = "negotiation/$tripId?reason=$reason"
     }
     object ActiveTrip : Screen("active_trip/{tripId}") {
         fun route(tripId: String) = "active_trip/$tripId"

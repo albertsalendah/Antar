@@ -39,6 +39,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -76,7 +77,8 @@ import java.util.TimeZone
 
 // ── Constants & helpers ───────────────────────────────────────────────────────
 
-private const val CANDIDATE_TIMEOUT_SECONDS = 180L // 3 minutes, mirrors cron timeout
+private const val CANDIDATE_TIMEOUT_SECONDS = 180L
+private const val POPUP_COUNTDOWN_SECONDS   = 10
 
 private val PrimaryBlue = Color(0xFF1B6CA8)
 private val Green       = Color(0xFF2E7D32)
@@ -84,17 +86,12 @@ private val Amber       = Color(0xFFF57F17)
 private val AmberLight  = Color(0xFFFFF8E1)
 private val Red         = Color(0xFFE53935)
 
-/**
- * Parses a PostgreSQL timestamptz text value to epoch-millis (UTC).
- * Handles both "2024-01-15T10:30:00Z" and "2024-01-15 10:30:00.123456+00" formats.
- * Returns null on any parse failure so callers can handle gracefully.
- */
 internal fun parseUtcMillis(ts: String?): Long? {
     ts ?: return null
     return try {
         val s = ts.trim()
-            .replace(' ', 'T')                    // postgres space → ISO T
-            .replace(Regex("\\.[0-9]+"), "")      // strip fractional seconds
+            .replace(' ', 'T')
+            .replace(Regex("\\.[0-9]+"), "")
             .replace("+00:00", "").replace("+00", "")
             .removeSuffix("Z")
         SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss", Locale.US)
@@ -128,24 +125,53 @@ class CandidateReviewViewModel(app: Application) : AndroidViewModel(app) {
     var cancelError           by mutableStateOf<String?>(null)
     var showNonResponseDialog by mutableStateOf(false)
 
+    // ── Declined dialog state [R1, R3, R4, R5, R6] ────────────────────────────
+    // Shown when an approved candidate driver declines the trip.
+    // The next candidate driver is NOT notified until the rider taps Continue
+    // and approve-candidate is called — this is what "pauses the search" [R3].
+    var showDeclinedDialog     by mutableStateOf(false)
+    var pendingNextCandidateId by mutableStateOf<String?>(null); private set
+
+    // dialogTriggered: prevents Realtime and polling from both showing the dialog
+    // simultaneously. Also used when showNonResponseDialog fires (cron timeout)
+    // to prevent showDeclinedDialog from triggering at the same time.
+    private var dialogTriggered  = false
+    // wasInWaitingState: true once we see candidateApproved = true; used to detect
+    // the transition that means an approved driver declined or went offline.
+    private var wasInWaitingState = false
+    private var currentTripId     = ""
+
     private var channel: RealtimeChannel? = null
     private var pollJob: Job?             = null
     private var started = false
 
+    /**
+     * @param initialReason Pass "declined" when navigating here via a background FCM tap
+     *   after a driver decline — the dialog is shown once the trip loads.
+     *   Leave empty ("") for all normal navigation paths.
+     */
     fun start(
         tripId: String,
+        initialReason: String = "",
         onOfferReceived: () -> Unit,
         onNoDriverFound: () -> Unit,
         onTripCancelled: () -> Unit,
     ) {
         if (started) return
-        started = true
-        loadTrip(tripId, onOfferReceived, onTripCancelled)
+        currentTripId = tripId
+        started       = true
+        if (initialReason == "declined") dialogTriggered = true
+        loadTrip(tripId, showDialogOnLoad = initialReason == "declined", onOfferReceived, onTripCancelled)
         subscribeRealtime(tripId, onOfferReceived, onTripCancelled)
         startPolling(tripId, onOfferReceived, onTripCancelled)
     }
 
-    private fun loadTrip(tripId: String, onOfferReceived: () -> Unit, onTripCancelled: () -> Unit) {
+    private fun loadTrip(
+        tripId: String,
+        showDialogOnLoad: Boolean = false,
+        onOfferReceived: () -> Unit,
+        onTripCancelled: () -> Unit,
+    ) {
         viewModelScope.launch {
             loading = true
             error   = null
@@ -153,15 +179,30 @@ class CandidateReviewViewModel(app: Application) : AndroidViewModel(app) {
                 val resp = api.getTrip(tripId)
                 if (resp.isSuccessful) {
                     val t = resp.body()?.data ?: return@runCatching
-                    trip = t
-                    handleTrip(t, onOfferReceived, onTripCancelled)
-                } else error = "Gagal memuat detail pesanan"
+                    // Background FCM tap: trip already transitioned, show dialog.
+                    // Only show if not approved (the decline already happened).
+                    if (showDialogOnLoad && !t.candidateApproved) {
+                        trip = t
+                        pendingNextCandidateId = t.candidateDriverId
+                        showDeclinedDialog = true
+                    } else {
+                        if (t.candidateApproved) wasInWaitingState = true
+                        trip = t
+                        handleTrip(t, onOfferReceived, onTripCancelled)
+                    }
+                } else {
+                    error = "Gagal memuat detail pesanan"
+                }
             }.onFailure { error = "Tidak dapat terhubung ke server" }
             loading = false
         }
     }
 
-    private fun subscribeRealtime(tripId: String, onOfferReceived: () -> Unit, onTripCancelled: () -> Unit) {
+    private fun subscribeRealtime(
+        tripId: String,
+        onOfferReceived: () -> Unit,
+        onTripCancelled: () -> Unit,
+    ) {
         viewModelScope.launch {
             runCatching {
                 val ch = supabase.channel("candidate_review_$tripId-${System.currentTimeMillis()}")
@@ -170,14 +211,12 @@ class CandidateReviewViewModel(app: Application) : AndroidViewModel(app) {
                     table = "trips"
                     filter("id", FilterOperator.EQ, tripId)
                 }.onEach { _ ->
-                    // Re-fetch to get full candidate fields; Realtime payload alone is insufficient
                     viewModelScope.launch {
                         runCatching {
                             val resp = api.getTrip(tripId)
                             if (resp.isSuccessful) {
                                 val t = resp.body()?.data ?: return@runCatching
-                                trip = t
-                                handleTrip(t, onOfferReceived, onTripCancelled)
+                                processTrip(t, onOfferReceived, onTripCancelled)
                             }
                         }
                     }
@@ -187,7 +226,11 @@ class CandidateReviewViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    private fun startPolling(tripId: String, onOfferReceived: () -> Unit, onTripCancelled: () -> Unit) {
+    private fun startPolling(
+        tripId: String,
+        onOfferReceived: () -> Unit,
+        onTripCancelled: () -> Unit,
+    ) {
         pollJob = viewModelScope.launch {
             while (true) {
                 delay(5_000L)
@@ -195,28 +238,117 @@ class CandidateReviewViewModel(app: Application) : AndroidViewModel(app) {
                     val resp = api.getTrip(tripId)
                     if (resp.isSuccessful) {
                         val t = resp.body()?.data ?: return@runCatching
-                        trip = t
-                        handleTrip(t, onOfferReceived, onTripCancelled)
+                        processTrip(t, onOfferReceived, onTripCancelled)
                     }
                 }
             }
         }
     }
 
-    private fun handleTrip(t: TripResponse, onOfferReceived: () -> Unit, onTripCancelled: () -> Unit) {
+    /**
+     * Central trip processing — replaces the old handleTrip.
+     * Detects the wasInWaitingState → !candidateApproved transition that signals
+     * a driver declined or went offline after being approved by the rider.
+     *
+     * Guard conditions before showing declined dialog:
+     *   - wasInWaitingState must be true (rider had already approved a candidate)
+     *   - candidateApproved must now be false (that candidate is gone)
+     *   - dialogTriggered must be false (prevent double-fire from Realtime + poll)
+     */
+    private fun processTrip(
+        t: TripResponse,
+        onOfferReceived: () -> Unit,
+        onTripCancelled: () -> Unit,
+    ) {
+        val candidateDeclined = wasInWaitingState && !t.candidateApproved && !dialogTriggered
+
+        if (candidateDeclined) {
+            dialogTriggered        = true
+            pendingNextCandidateId = t.candidateDriverId
+            // Do NOT update trip state yet — keep the old approved candidate card
+            // visible as the backdrop while the dialog is shown.
+            showDeclinedDialog = true
+            return
+        }
+
+        if (t.candidateApproved) wasInWaitingState = true
+        trip = t
+        handleTrip(t, onOfferReceived, onTripCancelled)
+    }
+
+    private fun handleTrip(
+        t: TripResponse,
+        onOfferReceived: () -> Unit,
+        onTripCancelled: () -> Unit,
+    ) {
         when (t.status) {
             "offered"   -> { stopWatching(); onOfferReceived() }
             "cancelled" -> { stopWatching(); onTripCancelled() }
         }
     }
 
-    // ── Actions ───────────────────────────────────────────────────────────────
+    // ── Declined dialog actions ───────────────────────────────────────────────
 
     /**
-     * Approve the suggested candidate driver. The server fires FCM to the driver.
-     * Refreshes the trip immediately to get the candidateApprovedAt timestamp,
-     * which starts the client-side 3-minute countdown.
+     * Rider chooses to continue searching [R4].
+     *
+     * If a next candidate exists: calls approve-candidate — this is when the
+     * next driver gets notified [R3] — then updates in place (rider stays on
+     * CandidateReview, countdown restarts for the new candidate).
+     * If no next candidate: navigates to NoDriverFound [R5, R6].
      */
+    fun continueAfterDeclined(onNoDriverFound: () -> Unit) {
+        showDeclinedDialog = false
+        dialogTriggered    = false
+        wasInWaitingState  = false
+        val nextId = pendingNextCandidateId
+        if (nextId == null) {
+            onNoDriverFound()
+            return
+        }
+        viewModelScope.launch {
+            actionLoading = true
+            runCatching {
+                val resp = api.approveCandidate(currentTripId, ApproveCandidateRequest(nextId))
+                if (resp.isSuccessful) {
+                    // Refresh to get candidateApprovedAt so the Waiting countdown starts fresh
+                    val refresh = api.getTrip(currentTripId)
+                    if (refresh.isSuccessful) {
+                        val t = refresh.body()?.data
+                        if (t != null) {
+                            wasInWaitingState = true
+                            trip = t
+                        }
+                    }
+                } else {
+                    // Candidate gone — show updated state and let user act normally
+                    val refresh = api.getTrip(currentTripId)
+                    if (refresh.isSuccessful) {
+                        val t = refresh.body()?.data
+                        if (t != null) {
+                            trip = t
+                            if (t.candidateDriverId == null) onNoDriverFound()
+                            // else: new unapproved candidate will render in ReviewState
+                        }
+                    }
+                }
+            }.onFailure { error = "Tidak dapat terhubung ke server" }
+            actionLoading = false
+        }
+    }
+
+    /**
+     * Rider chooses to stop searching [R5].
+     * Trip stays 'requested'; rider navigates to NoDriverFound to pick manually
+     * or cancel from there. No API call — approve-candidate is never called [R3].
+     */
+    fun stopAfterDeclined(onNoDriverFound: () -> Unit) {
+        showDeclinedDialog = false
+        onNoDriverFound()
+    }
+
+    // ── Existing actions ──────────────────────────────────────────────────────
+
     fun approve(tripId: String, driverId: String) {
         if (actionLoading) return
         viewModelScope.launch {
@@ -226,7 +358,13 @@ class CandidateReviewViewModel(app: Application) : AndroidViewModel(app) {
                 val resp = api.approveCandidate(tripId, ApproveCandidateRequest(driverId))
                 if (resp.isSuccessful) {
                     val refresh = api.getTrip(tripId)
-                    if (refresh.isSuccessful) trip = refresh.body()?.data
+                    if (refresh.isSuccessful) {
+                        val t = refresh.body()?.data
+                        if (t != null) {
+                            wasInWaitingState = true  // now in waiting state
+                            trip = t
+                        }
+                    }
                 } else {
                     error = parseApiError(resp.errorBody()?.string()) ?: "Gagal menyetujui driver"
                 }
@@ -235,17 +373,16 @@ class CandidateReviewViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    /**
-     * Reject the current candidate. Server finds the next nearest eligible driver
-     * and returns their ID in the response, or null if no eligible drivers remain.
-     * Navigates to NoDriverFound only when the response candidateDriverId is null.
-     */
     fun rejectCandidate(tripId: String, onNoDriverFound: () -> Unit) {
         if (actionLoading) return
         viewModelScope.launch {
             actionLoading         = true
             error                 = null
             showNonResponseDialog = false
+            // Rider is explicitly rejecting — not a driver-initiated decline.
+            // Clear wasInWaitingState so processTrip doesn't trigger showDeclinedDialog
+            // when the resulting candidateApproved=false update arrives.
+            wasInWaitingState = false
             runCatching {
                 val resp = api.rejectCandidate(tripId)
                 if (resp.isSuccessful) {
@@ -254,7 +391,6 @@ class CandidateReviewViewModel(app: Application) : AndroidViewModel(app) {
                         stopWatching()
                         onNoDriverFound()
                     } else {
-                        // New candidate assigned; refresh to display updated card
                         val refresh = api.getTrip(tripId)
                         if (refresh.isSuccessful) trip = refresh.body()?.data
                     }
@@ -264,6 +400,16 @@ class CandidateReviewViewModel(app: Application) : AndroidViewModel(app) {
             }.onFailure { error = "Tidak dapat terhubung ke server" }
             actionLoading = false
         }
+    }
+
+    /**
+     * Called from the screen's countdown LaunchedEffect when the 3-min window expires.
+     * Sets dialogTriggered to prevent showDeclinedDialog from firing concurrently
+     * if a Realtime update arrives at the same moment the cron reassigns.
+     */
+    fun triggerNonResponseDialog() {
+        dialogTriggered       = true
+        showNonResponseDialog = true
     }
 
     fun cancelTrip(tripId: String, onCancelled: () -> Unit) {
@@ -295,6 +441,7 @@ class CandidateReviewViewModel(app: Application) : AndroidViewModel(app) {
 @Composable
 fun CandidateReviewScreen(
     tripId: String,
+    initialReason: String = "",
     onOfferReceived: () -> Unit,
     onNoDriverFound: () -> Unit,
     onTripCancelled: () -> Unit,
@@ -303,15 +450,14 @@ fun CandidateReviewScreen(
     var showCancelDialog by remember { mutableStateOf(false) }
 
     LaunchedEffect(Unit) {
-        viewModel.start(tripId, onOfferReceived, onNoDriverFound, onTripCancelled)
+        viewModel.start(tripId, initialReason, onOfferReceived, onNoDriverFound, onTripCancelled)
     }
 
-    val trip = viewModel.trip
+    val trip                = viewModel.trip
     val candidateApprovedAt = trip?.candidateApprovedAt
     val candidateApproved   = trip?.candidateApproved ?: false
 
-    // ── Countdown when candidate is approved ──────────────────────────────────
-    // Ticks every 500ms; triggers showNonResponseDialog when it reaches zero.
+    // ── 3-min countdown (non-response) ────────────────────────────────────────
     var countdownSeconds by remember { mutableLongStateOf(CANDIDATE_TIMEOUT_SECONDS) }
     LaunchedEffect(candidateApprovedAt, candidateApproved) {
         if (!candidateApproved || candidateApprovedAt == null) {
@@ -319,23 +465,22 @@ fun CandidateReviewScreen(
             return@LaunchedEffect
         }
         val approvedMs = parseUtcMillis(candidateApprovedAt) ?: run {
-            viewModel.showNonResponseDialog = true
+            viewModel.triggerNonResponseDialog()
             return@LaunchedEffect
         }
         while (true) {
             val remaining = ((approvedMs + CANDIDATE_TIMEOUT_SECONDS * 1000L) - System.currentTimeMillis()) / 1000L
             countdownSeconds = remaining.coerceAtLeast(0L)
             if (remaining <= 0L) {
-                viewModel.showNonResponseDialog = true
+                viewModel.triggerNonResponseDialog()
                 break
             }
             delay(500L)
         }
     }
 
-    // ── Auto-confirm countdown inside the non-response dialog ─────────────────
-    // Counts down from 30s; at zero it automatically calls rejectCandidate.
-    var autoConfirmSec by remember { mutableStateOf(30) }
+    // ── 30s auto-confirm inside non-response dialog ───────────────────────────
+    var autoConfirmSec by remember { mutableIntStateOf(30) }
     LaunchedEffect(viewModel.showNonResponseDialog) {
         if (!viewModel.showNonResponseDialog) { autoConfirmSec = 30; return@LaunchedEffect }
         var i = 30
@@ -365,15 +510,15 @@ fun CandidateReviewScreen(
         )
     }
 
-    // ── Non-response dialog ───────────────────────────────────────────────────
+    // ── Non-response dialog (3-min countdown expired) ─────────────────────────
     if (viewModel.showNonResponseDialog) {
         AlertDialog(
-            onDismissRequest = { /* intentionally non-dismissible; user must choose */ },
+            onDismissRequest = { /* non-dismissible */ },
             title = { Text("Driver Tidak Merespons") },
             text  = {
                 Text(
                     "Driver tidak merespons tepat waktu. " +
-                            "Kami akan mencari driver lain, atau batalkan pesanan."
+                    "Kami akan mencari driver lain, atau batalkan pesanan."
                 )
             },
             confirmButton = {
@@ -394,12 +539,22 @@ fun CandidateReviewScreen(
                 OutlinedButton(
                     onClick  = {
                         viewModel.showNonResponseDialog = false
-                        showCancelDialog                = true
+                        showCancelDialog = true
                     },
                     enabled  = !viewModel.actionLoading,
                     colors   = ButtonDefaults.outlinedButtonColors(contentColor = Red),
                 ) { Text("Batalkan Pesanan") }
             },
+        )
+    }
+
+    // ── Declined dialog [R1, R4, R5, R6] ─────────────────────────────────────
+    if (viewModel.showDeclinedDialog) {
+        DriverDeclinedDialog(
+            hasNextCandidate = viewModel.pendingNextCandidateId != null,
+            actionLoading    = viewModel.actionLoading,
+            onContinue       = { viewModel.continueAfterDeclined(onNoDriverFound) },
+            onStop           = { viewModel.stopAfterDeclined(onNoDriverFound) },
         )
     }
 
@@ -428,27 +583,25 @@ fun CandidateReviewScreen(
                 viewModel.error != null && trip == null -> {
                     Text(
                         viewModel.error!!, color = MaterialTheme.colorScheme.error,
-                        style    = MaterialTheme.typography.bodyMedium,
+                        style = MaterialTheme.typography.bodyMedium,
                         textAlign = TextAlign.Center,
                     )
                 }
                 trip != null -> {
                     val hasCandidate = trip.candidateDriverId != null
                     val isApproved   = trip.candidateApproved
-                    // candidateDriverId == null + notificationAttempts > 0 means the cron
-                    // exhausted all nearby drivers; there's nobody left to assign.
                     val isExhausted  = !hasCandidate && trip.notificationAttempts > 0
 
                     when {
-                        isExhausted         -> ExhaustedState(onNoDriverFound)
-                        !hasCandidate       -> SearchingState()
-                        !isApproved         -> ReviewState(
+                        isExhausted   -> ExhaustedState(onNoDriverFound)
+                        !hasCandidate -> SearchingState()
+                        !isApproved   -> ReviewState(
                             trip          = trip,
                             actionLoading = viewModel.actionLoading,
                             onApprove     = { viewModel.approve(tripId, trip.candidateDriverId!!) },
                             onReject      = { viewModel.rejectCandidate(tripId, onNoDriverFound) },
                         )
-                        else                -> WaitingState(
+                        else          -> WaitingState(
                             trip             = trip,
                             countdownSeconds = countdownSeconds,
                         )
@@ -468,8 +621,8 @@ fun CandidateReviewScreen(
             Spacer(Modifier.height(32.dp))
         }
 
-        // ── Cancel button (always visible except while non-response dialog is open) ──
-        if (!viewModel.showNonResponseDialog) {
+        // ── Cancel button ─────────────────────────────────────────────────────
+        if (!viewModel.showNonResponseDialog && !viewModel.showDeclinedDialog) {
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -491,7 +644,8 @@ fun CandidateReviewScreen(
                     colors   = ButtonDefaults.outlinedButtonColors(contentColor = Red),
                 ) {
                     if (viewModel.cancelLoading) {
-                        CircularProgressIndicator(color = Red, modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
+                        CircularProgressIndicator(
+                            color = Red, modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
                     } else {
                         Text("Batalkan Pesanan", fontWeight = FontWeight.Medium)
                     }
@@ -501,16 +655,72 @@ fun CandidateReviewScreen(
     }
 }
 
-// ── Content states ────────────────────────────────────────────────────────────
+// ── Declined dialog composable ────────────────────────────────────────────────
 
-/** No candidate assigned yet; cron trigger is finding a nearby driver. */
+/**
+ * Shown when an approved candidate driver declines the trip [R1].
+ * Non-dismissible — rider must choose Continue or Stop [R4].
+ * 10-second countdown auto-fires Continue [R4].
+ * Button label changes when no next candidate exists [R6].
+ */
+@Composable
+private fun DriverDeclinedDialog(
+    hasNextCandidate: Boolean,
+    actionLoading: Boolean,
+    onContinue: () -> Unit,
+    onStop: () -> Unit,
+) {
+    var countdownSec by remember { mutableIntStateOf(POPUP_COUNTDOWN_SECONDS) }
+
+    LaunchedEffect(Unit) {
+        while (countdownSec > 0) {
+            delay(1_000L)
+            countdownSec--
+        }
+        onContinue()
+    }
+
+    AlertDialog(
+        onDismissRequest = { /* non-dismissible — rider must choose */ },
+        title = { Text("Driver Menolak") },
+        text  = {
+            Text(
+                "Driver tidak dapat menerima permintaan Anda. " +
+                "Kami akan mencarikan driver berikutnya, " +
+                "atau Anda dapat menghentikan pencarian."
+            )
+        },
+        confirmButton = {
+            Button(
+                onClick  = onContinue,
+                enabled  = !actionLoading,
+                colors   = ButtonDefaults.buttonColors(containerColor = PrimaryBlue),
+            ) {
+                if (actionLoading) {
+                    CircularProgressIndicator(
+                        color = Color.White, modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
+                } else {
+                    val label = if (hasNextCandidate) "Lanjut Cari" else "Lihat Driver Tersedia"
+                    Text("$label ($countdownSec)")
+                }
+            }
+        },
+        dismissButton = {
+            OutlinedButton(
+                onClick  = onStop,
+                enabled  = !actionLoading,
+                colors   = ButtonDefaults.outlinedButtonColors(contentColor = Red),
+            ) { Text("Berhenti") }
+        },
+    )
+}
+
+// ── Content states (unchanged) ────────────────────────────────────────────────
+
 @Composable
 private fun SearchingState() {
     CircularProgressIndicator(
-        color       = PrimaryBlue,
-        modifier    = Modifier.size(64.dp),
-        strokeWidth = 5.dp,
-    )
+        color = PrimaryBlue, modifier = Modifier.size(64.dp), strokeWidth = 5.dp)
     Spacer(Modifier.height(28.dp))
     Text(
         "Mencari Driver Terdekat",
@@ -527,16 +737,11 @@ private fun SearchingState() {
     )
 }
 
-/** Cron exhausted all nearby drivers; notification_attempts reached the limit. */
 @Composable
 private fun ExhaustedState(onViewRejected: () -> Unit) {
     Surface(shape = CircleShape, color = Color(0xFFFFEBEE), modifier = Modifier.size(80.dp)) {
         Box(contentAlignment = Alignment.Center, modifier = Modifier.fillMaxSize()) {
-            Icon(
-                Icons.Default.DirectionsCar, null,
-                tint     = Red,
-                modifier = Modifier.size(40.dp),
-            )
+            Icon(Icons.Default.DirectionsCar, null, tint = Red, modifier = Modifier.size(40.dp))
         }
     }
     Spacer(Modifier.height(20.dp))
@@ -549,7 +754,7 @@ private fun ExhaustedState(onViewRejected: () -> Unit) {
     Spacer(Modifier.height(8.dp))
     Text(
         "Semua driver di area Anda tidak merespons. " +
-                "Anda dapat memilih dari driver yang sudah Anda tolak sebelumnya.",
+        "Anda dapat memilih dari driver yang sudah Anda tolak sebelumnya.",
         style     = MaterialTheme.typography.bodyMedium.copy(color = Color(0xFF777777)),
         textAlign = TextAlign.Center,
         modifier  = Modifier.padding(horizontal = 8.dp),
@@ -560,12 +765,9 @@ private fun ExhaustedState(onViewRejected: () -> Unit) {
         modifier = Modifier.fillMaxWidth().height(50.dp),
         shape    = RoundedCornerShape(12.dp),
         colors   = ButtonDefaults.buttonColors(containerColor = PrimaryBlue),
-    ) {
-        Text("Lihat Driver Sebelumnya", fontWeight = FontWeight.SemiBold)
-    }
+    ) { Text("Lihat Driver Sebelumnya", fontWeight = FontWeight.SemiBold) }
 }
 
-/** Candidate is assigned; rider reviews and decides to approve or find another. */
 @Composable
 private fun ReviewState(
     trip: TripResponse,
@@ -596,7 +798,8 @@ private fun ReviewState(
         colors   = ButtonDefaults.buttonColors(containerColor = Green),
     ) {
         if (actionLoading) {
-            CircularProgressIndicator(color = Color.White, modifier = Modifier.size(20.dp), strokeWidth = 2.dp)
+            CircularProgressIndicator(
+                color = Color.White, modifier = Modifier.size(20.dp), strokeWidth = 2.dp)
         } else {
             Icon(Icons.Default.Check, null, modifier = Modifier.size(18.dp))
             Spacer(Modifier.width(8.dp))
@@ -610,12 +813,9 @@ private fun ReviewState(
         modifier = Modifier.fillMaxWidth().height(48.dp),
         shape    = RoundedCornerShape(12.dp),
         colors   = ButtonDefaults.outlinedButtonColors(contentColor = Color(0xFF666666)),
-    ) {
-        Text("Cari Driver Lain", fontWeight = FontWeight.Medium)
-    }
+    ) { Text("Cari Driver Lain", fontWeight = FontWeight.Medium) }
 }
 
-/** Candidate approved; rider waits for driver to respond (make an offer). */
 @Composable
 private fun WaitingState(trip: TripResponse, countdownSeconds: Long) {
     val isLow = countdownSeconds in 1..30
@@ -634,7 +834,6 @@ private fun WaitingState(trip: TripResponse, countdownSeconds: Long) {
     Spacer(Modifier.height(24.dp))
     CandidateDriverCard(trip)
     Spacer(Modifier.height(16.dp))
-    // Countdown badge
     Surface(
         shape = RoundedCornerShape(12.dp),
         color = if (isLow) Color(0xFFFFEBEE) else AmberLight,
@@ -645,9 +844,8 @@ private fun WaitingState(trip: TripResponse, countdownSeconds: Long) {
             horizontalArrangement = Arrangement.spacedBy(10.dp),
         ) {
             CircularProgressIndicator(
-                color       = if (isLow) Red else Amber,
-                modifier    = Modifier.size(18.dp),
-                strokeWidth = 2.dp,
+                color = if (isLow) Red else Amber,
+                modifier = Modifier.size(18.dp), strokeWidth = 2.dp,
             )
             Text(
                 if (countdownSeconds > 0) "${formatCountdown(countdownSeconds)} tersisa"
@@ -660,8 +858,6 @@ private fun WaitingState(trip: TripResponse, countdownSeconds: Long) {
         }
     }
 }
-
-// ── Shared driver card ────────────────────────────────────────────────────────
 
 @Composable
 private fun CandidateDriverCard(trip: TripResponse) {
@@ -676,32 +872,23 @@ private fun CandidateDriverCard(trip: TripResponse) {
             verticalAlignment     = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(14.dp),
         ) {
-            // Avatar
             if (!trip.candidateDriverAvatarUrl.isNullOrEmpty()) {
                 AsyncImage(
                     model              = trip.candidateDriverAvatarUrl,
                     contentDescription = "Foto driver",
                     contentScale       = ContentScale.Crop,
-                    modifier           = Modifier
-                        .size(64.dp)
-                        .clip(CircleShape),
+                    modifier           = Modifier.size(64.dp).clip(CircleShape),
                 )
             } else {
-                Surface(
-                    shape    = CircleShape,
-                    color    = Color(0xFFE8F4FD),
-                    modifier = Modifier.size(64.dp),
-                ) {
+                Surface(shape = CircleShape, color = Color(0xFFE8F4FD), modifier = Modifier.size(64.dp)) {
                     Box(contentAlignment = Alignment.Center, modifier = Modifier.fillMaxSize()) {
                         Icon(
                             Icons.Default.Person, null,
-                            tint     = PrimaryBlue,
-                            modifier = Modifier.size(36.dp),
+                            tint = PrimaryBlue, modifier = Modifier.size(36.dp),
                         )
                     }
                 }
             }
-            // Name, vehicle, rating
             Column(modifier = Modifier.weight(1f)) {
                 Text(
                     trip.candidateDriverName ?: "Driver",
@@ -720,7 +907,6 @@ private fun CandidateDriverCard(trip: TripResponse) {
                     }
                     Spacer(Modifier.height(6.dp))
                 }
-                // Rating row
                 val rating = trip.candidateDriverRating
                 if (rating != null) {
                     Row(

@@ -43,6 +43,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -57,6 +58,7 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.richard_salendah.antar.ui.common.HapticType
 import com.richard_salendah.antar.ui.common.rememberHaptic
+import kotlinx.coroutines.delay
 import java.text.NumberFormat
 import java.util.Locale
 import kotlin.math.roundToInt
@@ -65,23 +67,34 @@ private val PrimaryBlue = Color(0xFF1B6CA8)
 private val Green       = Color(0xFF2E7D32)
 private val Red         = Color(0xFFE53935)
 
+private const val POPUP_COUNTDOWN_SECONDS = 10
+
 @Composable
 fun NegotiationScreen(
     tripId: String,
+    initialReason: String = "",
     onOfferAccepted: () -> Unit,
     onTripReset: () -> Unit,
+    onNoDriverFound: () -> Unit,
     viewModel: NegotiationViewModel = viewModel(),
 ) {
     val haptic = rememberHaptic()
 
-    LaunchedEffect(Unit) { viewModel.start(tripId, onOfferAccepted, onTripReset) }
+    LaunchedEffect(Unit) {
+        viewModel.start(tripId, initialReason, onOfferAccepted, onTripReset)
+    }
 
-    // NEG-REJECT: confirm dialog before rejecting — mirrors SearchingScreen cancel pattern.
+    // ── Reject confirm dialog ─────────────────────────────────────────────────
     if (viewModel.showRejectDialog) {
         AlertDialog(
             onDismissRequest = { viewModel.showRejectDialog = false },
             title = { Text("Tolak Penawaran?") },
-            text  = { Text("Penawaran akan ditolak dan driver perlu menawar ulang. Yakin ingin menolak?") },
+            text  = {
+                Text(
+                    "Penawaran akan ditolak dan driver perlu menawar ulang. " +
+                    "Yakin ingin menolak?"
+                )
+            },
             confirmButton = {
                 Button(
                     onClick = { viewModel.reject(tripId, onTripReset) },
@@ -91,6 +104,21 @@ fun NegotiationScreen(
             dismissButton = {
                 TextButton(onClick = { viewModel.showRejectDialog = false }) { Text("Batal") }
             },
+        )
+    }
+
+    // ── Withdrew dialog [R2, R4, R5, R6] ─────────────────────────────────────
+    if (viewModel.showWithdrewDialog) {
+        DriverWithdrewDialog(
+            hasNextCandidate = viewModel.pendingNextCandidateId != null,
+            actionLoading    = viewModel.actionLoading,
+            onContinue       = {
+                viewModel.continueSearch(
+                    onNavigateToCandidateReview = onTripReset,
+                    onNoDriverFound             = onNoDriverFound,
+                )
+            },
+            onStop = { viewModel.stopSearch(onNoDriverFound) },
         )
     }
 
@@ -238,13 +266,11 @@ fun NegotiationScreen(
                                 style = MaterialTheme.typography.titleMedium.copy(
                                     fontWeight = FontWeight.SemiBold, color = PrimaryBlue),
                             )
-
                             Spacer(Modifier.height(16.dp))
 
                             var rawInput by remember {
                                 mutableStateOf(viewModel.counterFare.roundToInt().toString())
                             }
-
                             LaunchedEffect(viewModel.counterFare) {
                                 val asStr = viewModel.counterFare.roundToInt().toString()
                                 if (rawInput != asStr) rawInput = asStr
@@ -263,9 +289,7 @@ fun NegotiationScreen(
                                     modifier       = Modifier.size(52.dp),
                                     contentPadding = PaddingValues(0.dp),
                                     shape          = RoundedCornerShape(12.dp),
-                                ) {
-                                    Text("−", fontSize = 22.sp, fontWeight = FontWeight.Bold)
-                                }
+                                ) { Text("−", fontSize = 22.sp, fontWeight = FontWeight.Bold) }
 
                                 Spacer(Modifier.width(12.dp))
 
@@ -274,13 +298,10 @@ fun NegotiationScreen(
                                     onValueChange = { input ->
                                         val filtered = input.filter { it.isDigit() }
                                         rawInput = filtered
-                                        viewModel.setCounterFare(
-                                            filtered.toDoubleOrNull() ?: 0.0
-                                        )
+                                        viewModel.setCounterFare(filtered.toDoubleOrNull() ?: 0.0)
                                     },
                                     keyboardOptions = KeyboardOptions(
-                                        keyboardType = KeyboardType.Number,
-                                    ),
+                                        keyboardType = KeyboardType.Number),
                                     textStyle = LocalTextStyle.current.copy(
                                         fontSize   = 24.sp,
                                         fontWeight = FontWeight.Bold,
@@ -308,41 +329,34 @@ fun NegotiationScreen(
                                     modifier       = Modifier.size(52.dp),
                                     contentPadding = PaddingValues(0.dp),
                                     shape          = RoundedCornerShape(12.dp),
-                                ) {
-                                    Text("+", fontSize = 22.sp, fontWeight = FontWeight.Bold)
-                                }
+                                ) { Text("+", fontSize = 22.sp, fontWeight = FontWeight.Bold) }
                             }
 
                             Spacer(Modifier.height(6.dp))
-
                             Text(
                                 "Ketuk + / − untuk ubah Rp 1.000",
-                                style    = MaterialTheme.typography.labelSmall,
-                                color    = MaterialTheme.colorScheme.onSurfaceVariant,
-                                modifier = Modifier.fillMaxWidth(),
+                                style     = MaterialTheme.typography.labelSmall,
+                                color     = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier  = Modifier.fillMaxWidth(),
                                 textAlign = TextAlign.Center,
                             )
-
                             Spacer(Modifier.height(16.dp))
 
                             Row(
                                 horizontalArrangement = Arrangement.spacedBy(8.dp),
-                                modifier = Modifier.fillMaxWidth(),
+                                modifier              = Modifier.fillMaxWidth(),
                             ) {
                                 OutlinedButton(
                                     onClick  = { viewModel.showCounter = false },
                                     modifier = Modifier.weight(1f),
                                     shape    = RoundedCornerShape(10.dp),
                                 ) { Text("Batal") }
-
-                                // CONN-2: disabled while any action is in flight
                                 Button(
                                     onClick = {
                                         haptic.perform(HapticType.Tick)
                                         viewModel.submitCounter(tripId)
                                     },
-                                    enabled  = !viewModel.actionLoading &&
-                                            viewModel.counterFare > 0,
+                                    enabled  = !viewModel.actionLoading && viewModel.counterFare > 0,
                                     modifier = Modifier.weight(1f),
                                     shape    = RoundedCornerShape(10.dp),
                                     colors   = ButtonDefaults.buttonColors(
@@ -366,9 +380,9 @@ fun NegotiationScreen(
                     Spacer(Modifier.height(8.dp))
                     Text(
                         viewModel.error!!,
-                        color    = MaterialTheme.colorScheme.error,
-                        style    = MaterialTheme.typography.bodySmall,
-                        modifier = Modifier.fillMaxWidth(),
+                        color     = MaterialTheme.colorScheme.error,
+                        style     = MaterialTheme.typography.bodySmall,
+                        modifier  = Modifier.fillMaxWidth(),
                         textAlign = TextAlign.Center,
                     )
                 }
@@ -378,9 +392,9 @@ fun NegotiationScreen(
                 if (trip.lastOfferBy == "rider") {
                     Text(
                         "Menunggu respons driver…",
-                        style    = MaterialTheme.typography.bodySmall.copy(
+                        style     = MaterialTheme.typography.bodySmall.copy(
                             color = Color(0xFF999999)),
-                        modifier = Modifier.fillMaxWidth(),
+                        modifier  = Modifier.fillMaxWidth(),
                         textAlign = TextAlign.Center,
                     )
                 }
@@ -398,7 +412,6 @@ fun NegotiationScreen(
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 if (isRiderTurn && !viewModel.showCounter) {
-                    // CONN-2: accept is disabled while any action is in flight
                     Button(
                         onClick = {
                             haptic.perform(HapticType.Confirm)
@@ -416,10 +429,7 @@ fun NegotiationScreen(
                                 strokeWidth = 2.dp,
                             )
                         else {
-                            Icon(
-                                Icons.Default.Check, null,
-                                modifier = Modifier.size(18.dp),
-                            )
+                            Icon(Icons.Default.Check, null, modifier = Modifier.size(18.dp))
                             Spacer(Modifier.width(6.dp))
                             Text(
                                 "Terima Penawaran",
@@ -442,10 +452,7 @@ fun NegotiationScreen(
                                 colors   = ButtonDefaults.outlinedButtonColors(
                                     contentColor = PrimaryBlue),
                             ) {
-                                Icon(
-                                    Icons.Default.SwapVert, null,
-                                    modifier = Modifier.size(16.dp),
-                                )
+                                Icon(Icons.Default.SwapVert, null, modifier = Modifier.size(16.dp))
                                 Spacer(Modifier.width(4.dp))
                                 Text("Tawar", fontWeight = FontWeight.SemiBold)
                             }
@@ -458,9 +465,6 @@ fun NegotiationScreen(
                                 textAlign = TextAlign.Center,
                             )
                         }
-
-                        // NEG-REJECT: tap opens confirm dialog instead of rejecting immediately.
-                        // CONN-2: disabled while any action is in flight.
                         OutlinedButton(
                             onClick = {
                                 haptic.perform(HapticType.Tick)
@@ -469,24 +473,16 @@ fun NegotiationScreen(
                             enabled  = !viewModel.actionLoading,
                             modifier = Modifier.weight(1f).height(48.dp),
                             shape    = RoundedCornerShape(12.dp),
-                            colors   = ButtonDefaults.outlinedButtonColors(
-                                contentColor = Red),
+                            colors   = ButtonDefaults.outlinedButtonColors(contentColor = Red),
                         ) {
-                            Icon(
-                                Icons.Default.Close, null,
-                                modifier = Modifier.size(16.dp),
-                            )
+                            Icon(Icons.Default.Close, null, modifier = Modifier.size(16.dp))
                             Spacer(Modifier.width(4.dp))
                             Text("Tolak", fontWeight = FontWeight.SemiBold)
                         }
                     }
                 } else if (!isRiderTurn) {
                     TextButton(
-                        onClick  = {
-                            // When it's the driver's turn (rider waiting), "cancel" maps to
-                            // reject which resets back to requested.
-                            viewModel.showRejectDialog = true
-                        },
+                        onClick  = { viewModel.showRejectDialog = true },
                         modifier = Modifier.fillMaxWidth(),
                     ) {
                         Text(
@@ -499,6 +495,66 @@ fun NegotiationScreen(
             }
         }
     }
+}
+
+// ── Withdrew dialog composable ────────────────────────────────────────────────
+
+/**
+ * Shown when the driver withdraws their price offer [R2].
+ * Non-dismissible — rider must choose Continue or Stop [R4].
+ * 10-second countdown auto-fires Continue [R4].
+ * Button label changes when no next candidate exists [R6].
+ */
+@Composable
+private fun DriverWithdrewDialog(
+    hasNextCandidate: Boolean,
+    actionLoading: Boolean,
+    onContinue: () -> Unit,
+    onStop: () -> Unit,
+) {
+    var countdownSec by remember { mutableIntStateOf(POPUP_COUNTDOWN_SECONDS) }
+
+    LaunchedEffect(Unit) {
+        while (countdownSec > 0) {
+            delay(1_000L)
+            countdownSec--
+        }
+        onContinue()
+    }
+
+    AlertDialog(
+        onDismissRequest = { /* non-dismissible — rider must choose */ },
+        title = { Text("Driver Menarik Penawaran") },
+        text  = {
+            Text(
+                "Driver menarik penawaran harga mereka. " +
+                "Kami akan mencarikan driver berikutnya, " +
+                "atau Anda dapat menghentikan pencarian."
+            )
+        },
+        confirmButton = {
+            Button(
+                onClick  = onContinue,
+                enabled  = !actionLoading,
+                colors   = ButtonDefaults.buttonColors(containerColor = PrimaryBlue),
+            ) {
+                if (actionLoading) {
+                    CircularProgressIndicator(
+                        color = Color.White, modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
+                } else {
+                    val label = if (hasNextCandidate) "Lanjut Cari" else "Lihat Driver Tersedia"
+                    Text("$label ($countdownSec)")
+                }
+            }
+        },
+        dismissButton = {
+            OutlinedButton(
+                onClick  = onStop,
+                enabled  = !actionLoading,
+                colors   = ButtonDefaults.outlinedButtonColors(contentColor = Red),
+            ) { Text("Berhenti") }
+        },
+    )
 }
 
 // ── Detail row ────────────────────────────────────────────────────────────────

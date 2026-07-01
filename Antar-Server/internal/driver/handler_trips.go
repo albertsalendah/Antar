@@ -94,17 +94,16 @@ func (h *Handler) IncomingTrips(c *gin.Context) {
 	response.Success(c, trips)
 }
 
-// DeclineCandidate handles POST /api/v1/driver/trips/:trip_id/decline-candidate
-// Driver declines a trip they are the approved candidate for, before submitting
-// any offer. Immediately excludes the driver, finds and assigns the next nearest
-// eligible candidate (same SQL as WithdrawOffer / RejectCandidate — keep all four
-// in sync), notifies the rider via FCM, and notifies the next candidate driver.
-// Does NOT increment notification_attempts (reserved for cron-driven timeouts only).
+// Change summary [R3]:
+//   - Removed: goroutine that sent "new_trip" FCM to the next candidate driver.
+//   - Kept:    goroutine that sends "candidate_declined" FCM to the rider.
+//   - Reason:  Next driver must not be notified until rider decides to continue.
+//              FCM to next driver now fires only via approve-candidate.
+
 func (h *Handler) DeclineCandidate(c *gin.Context) {
 	tripID := c.Param("trip_id")
 	driverID, _ := c.Get("userID")
 
-	// Verify driver is the current approved candidate for a requested trip
 	var islandID, vehicleTypeID int
 	var pickupLat, pickupLng float64
 	var riderID string
@@ -124,7 +123,6 @@ func (h *Handler) DeclineCandidate(c *gin.Context) {
 		return
 	}
 
-	// Exclude this driver so they won't be reassigned to the same trip
 	if _, err := h.db.Exec(context.Background(),
 		`INSERT INTO trip_driver_exclusions (trip_id, driver_id)
 		 VALUES ($1, $2) ON CONFLICT (trip_id, driver_id) DO NOTHING`,
@@ -162,8 +160,6 @@ func (h *Handler) DeclineCandidate(c *gin.Context) {
 		pickupLng, pickupLat, islandID, vehicleTypeID, tripID,
 	).Scan(&nextDriverID)
 
-	// Reset candidate fields — candidate_approved_at NULL so any new candidate's
-	// countdown starts fresh from their own approval time, not a stale timestamp.
 	result, err := h.db.Exec(context.Background(),
 		`UPDATE trips
 		 SET candidate_driver_id   = $1,
@@ -186,8 +182,10 @@ func (h *Handler) DeclineCandidate(c *gin.Context) {
 		return
 	}
 
-	// Notify rider (FCM for backgrounded app — Realtime subscription on the
-	// trips row handles the in-app UI update via candidate_driver_id change).
+	// Notify rider via FCM so a backgrounded app can show the popup.
+	// Realtime subscription on the trips row handles the in-app update
+	// when the app is foreground (CandidateReviewViewModel owns the dialog).
+	// [R1, R7] — next driver NOT notified here; that fires via approve-candidate [R3].
 	go func() {
 		var riderToken string
 		h.db.QueryRow(context.Background(),
@@ -200,7 +198,7 @@ func (h *Handler) DeclineCandidate(c *gin.Context) {
 			Token: riderToken,
 			Notification: &fcm.Notification{
 				Title: "Driver Menolak",
-				Body:  "Driver menolak permintaan Anda — mencari driver berikutnya",
+				Body:  "Driver tidak dapat menerima permintaan Anda",
 			},
 			Data: map[string]string{
 				"type":    "candidate_declined",
@@ -211,32 +209,6 @@ func (h *Handler) DeclineCandidate(c *gin.Context) {
 				"trip_id", tripID, "error", err)
 		}
 	}()
-
-	// Notify next candidate driver if one was found
-	if nextDriverID != nil {
-		go func() {
-			var token string
-			h.db.QueryRow(context.Background(),
-				`SELECT COALESCE(fcm_token,'') FROM driver_profiles WHERE id = $1`, *nextDriverID,
-			).Scan(&token)
-			if token == "" {
-				return
-			}
-			if err := h.fcm.Send(context.Background(), fcm.Message{
-				Token: token,
-				Notification: &fcm.Notification{
-					Title: "Ada Permintaan Baru!",
-					Body:  "Ada penumpang yang mencari driver di dekat Anda",
-				},
-				Data: map[string]string{
-					"type":    "new_trip",
-					"trip_id": tripID,
-				},
-			}); err != nil {
-				slog.Warn("FCM notify next candidate after decline failed", "error", err)
-			}
-		}()
-	}
 
 	response.Success(c, gin.H{"message": "Trip declined"})
 }
@@ -416,33 +388,28 @@ func (h *Handler) CounterOffer(c *gin.Context) {
 	})
 }
 
-// WithdrawOffer handles POST /api/v1/driver/trips/:trip_id/withdraw-offer
-// Driver-side equivalent of rider's RejectOffer. CancelTrip can't be reused
-// here — it filters on driver_id, which is still NULL pre-acceptance;
-// offered_by is the correct ownership column for status='offered'. This was
-// also the latent reason "Tolak & Batalkan" on CounterDecisionScreen likely
-// already no-ops in production today.
-//
-// Design note (flagging for confirmation): the original TODO text only
-// specified resetting to 'requested' + clearing offer fields. Since the
-// trip's candidate_driver_id would otherwise still point at the withdrawing
-// driver, this handler also excludes them and searches for the next nearest
-// candidate immediately — same matching SQL as rider's RejectCandidate —
-// so the rider doesn't stall. Does NOT increment notification_attempts
-// (reserved for cron-driven non-response only, same as RejectCandidate).
+// Change summary [R2, R3]:
+//   - Added:   riderID to the initial SELECT so we can notify the rider.
+//   - Added:   goroutine that sends "driver_withdrew" FCM to the rider [R2].
+//             Previously the rider received ZERO notification when a driver withdrew.
+//   - Removed: goroutine that sent "new_trip" FCM to the next candidate driver [R3].
+//             Next driver is not notified until rider decides to continue.
+
 func (h *Handler) WithdrawOffer(c *gin.Context) {
 	tripID := c.Param("trip_id")
 	driverID, _ := c.Get("userID")
 
 	var islandID, vehicleTypeID int
 	var pickupLat, pickupLng float64
+	var riderID string
 	err := h.db.QueryRow(context.Background(),
 		`SELECT island_id, vehicle_type_id,
-		        ST_Y(pickup_location::geometry), ST_X(pickup_location::geometry)
+		        ST_Y(pickup_location::geometry), ST_X(pickup_location::geometry),
+		        rider_id
 		 FROM trips
 		 WHERE id = $1 AND offered_by = $2 AND status = 'offered'`,
 		tripID, driverID,
-	).Scan(&islandID, &vehicleTypeID, &pickupLat, &pickupLng)
+	).Scan(&islandID, &vehicleTypeID, &pickupLat, &pickupLng, &riderID)
 	if err != nil {
 		response.BadRequest(c, "Trip not found, not offered, or not yours")
 		return
@@ -459,8 +426,8 @@ func (h *Handler) WithdrawOffer(c *gin.Context) {
 	}
 
 	var nextDriverID *string
-	// Mirrors notify_nearest_driver_on_insert() / rider's RejectCandidate —
-	// keep all three in sync if the matching criteria ever changes.
+	// Mirrors notify_nearest_driver_on_insert() / rider's RejectCandidate /
+	// DeclineCandidate — keep all four in sync if matching criteria changes.
 	_ = h.db.QueryRow(context.Background(),
 		`SELECT dp.id
 		 FROM driver_profiles dp
@@ -483,7 +450,7 @@ func (h *Handler) WithdrawOffer(c *gin.Context) {
 		 ORDER BY ST_Distance(dp.last_location, ST_SetSRID(ST_MakePoint($1,$2),4326)) ASC
 		 LIMIT 1`,
 		pickupLng, pickupLat, islandID, vehicleTypeID, tripID,
-	).Scan(&nextDriverID) // no rows = no eligible driver left, nextDriverID stays nil — not an error
+	).Scan(&nextDriverID)
 
 	result, err := h.db.Exec(context.Background(),
 		`UPDATE trips
@@ -511,30 +478,33 @@ func (h *Handler) WithdrawOffer(c *gin.Context) {
 		return
 	}
 
-	if nextDriverID != nil {
-		go func() {
-			var token string
-			h.db.QueryRow(context.Background(),
-				`SELECT COALESCE(fcm_token,'') FROM driver_profiles WHERE id = $1`, *nextDriverID,
-			).Scan(&token)
-			if token == "" {
-				return
-			}
-			if err := h.fcm.Send(context.Background(), fcm.Message{
-				Token: token,
-				Notification: &fcm.Notification{
-					Title: "Ada Permintaan Baru!",
-					Body:  "Ada penumpang yang mencari driver di dekat Anda",
-				},
-				Data: map[string]string{
-					"type":    "new_trip",
-					"trip_id": tripID,
-				},
-			}); err != nil {
-				slog.Warn("FCM notify next candidate after withdraw failed", "error", err)
-			}
-		}()
-	}
+	// Notify rider via FCM so a backgrounded app can show the popup [R2, R7].
+	// Realtime subscription on the trips row handles the in-app update when
+	// the app is foreground (NegotiationViewModel owns the dialog).
+	// Next driver NOT notified here — that fires via approve-candidate [R3].
+	go func() {
+		var riderToken string
+		h.db.QueryRow(context.Background(),
+			`SELECT COALESCE(fcm_token,'') FROM rider_profiles WHERE id = $1`, riderID,
+		).Scan(&riderToken)
+		if riderToken == "" {
+			return
+		}
+		if err := h.fcm.Send(context.Background(), fcm.Message{
+			Token: riderToken,
+			Notification: &fcm.Notification{
+				Title: "Driver Menarik Penawaran",
+				Body:  "Driver menarik penawaran harga mereka",
+			},
+			Data: map[string]string{
+				"type":    "driver_withdrew",
+				"trip_id": tripID,
+			},
+		}); err != nil {
+			slog.Warn("FCM notify rider of offer withdrawal failed",
+				"trip_id", tripID, "error", err)
+		}
+	}()
 
 	response.Success(c, gin.H{"message": "Offer withdrawn"})
 }
